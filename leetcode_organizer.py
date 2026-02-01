@@ -8,14 +8,13 @@ LeetCode File Organizer
 - Получает условия задач с LeetCode и algo.monster
 """
 
-import os
 import re
 import shutil
 import time
 import requests
 from bs4 import BeautifulSoup
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional
 
 
 # Конфигурация
@@ -347,12 +346,7 @@ def get_algo_monster_problem(problem_number: int, slug: Optional[str] = None) ->
 def parse_leetcode_html_content(html_content: str) -> dict:
     """
     Парсит HTML контент задачи LeetCode и извлекает структурированную информацию.
-    
-    Args:
-        html_content: HTML контент задачи
-        
-    Returns:
-        Словарь с ключами: description, examples, constraints, images
+    Улучшенная версия с поддержкой inline-картинок и правильных степеней.
     """
     soup = BeautifulSoup(html_content, 'html.parser')
     
@@ -360,180 +354,104 @@ def parse_leetcode_html_content(html_content: str) -> dict:
         "description": "",
         "examples": [],
         "constraints": [],
-        "images": []
+        "images": [] # Оставляем для совместимости, но картинки будут в description
     }
     
-    # Извлекаем изображения
+    # 1. Обработка изображений (превращаем их сразу в Markdown внутри HTML)
     for img in soup.find_all('img'):
         src = img.get('src', '')
         if src:
-            # Преобразуем относительные URL в абсолютные
             if src.startswith('/'):
                 src = f"https://leetcode.com{src}"
             elif not src.startswith('http'):
                 src = f"https://leetcode.com/{src}"
-            result["images"].append(src)
+            # Заменяем тег img на markdown строку
+            img.replace_with(f"\n![Image]({src})\n")
+            result["images"].append(src) # На всякий случай сохраняем в список
+
+    # 2. Обработка sup/sub (степени и индексы)
+    # Заменяем прямо в дереве, чтобы сохранить позицию
+    for sup in soup.find_all('sup'):
+        sup.replace_with(f"^{sup.get_text().strip()}")
     
-    # Находим все элементы для правильного извлечения
-    all_elements = soup.find_all(['p', 'ul', 'ol', 'pre', 'strong'])
-    
-    # Ищем начало примеров и ограничений
-    example_start = None
-    constraints_start = None
-    
-    for elem in all_elements:
-        text = elem.get_text(strip=True)
-        if re.match(r'Example\s+\d+', text, re.I) and example_start is None:
-            example_start = elem
-        if 'Constraint' in text and constraints_start is None:
-            constraints_start = elem
-    
-    # Вспомогательная функция для извлечения текста с сохранением форматирования
-    def extract_text_with_formatting(elem):
-        """Извлекает текст с сохранением пробелов и математических обозначений"""
-        if elem is None:
-            return ""
+    for sub in soup.find_all('sub'):
+        sub.replace_with(f"_{sub.get_text().strip()}")
+
+    # 3. Извлечение Примеров (обычно они в тегах <pre>)
+    # Мы ищем <pre>, извлекаем из них данные, а затем удаляем из супа, 
+    # чтобы они не попали в общее описание
+    pre_tags = soup.find_all('pre')
+    for pre in pre_tags:
+        text = pre.get_text(separator='\n').strip()
         
-        # Обрабатываем sup теги (степени) - заменяем на ^
-        for sup in elem.find_all('sup'):
-            sup_text = sup.get_text(strip=True)
-            sup.replace_with(f"^{sup_text}")
-        
-        # Обрабатываем sub теги
-        for sub in elem.find_all('sub'):
-            sub_text = sub.get_text(strip=True)
-            sub.replace_with(f"_{sub_text}")
-        
-        # Извлекаем текст с пробелами между элементами
-        text = elem.get_text(separator=' ', strip=True)
-        # Нормализуем множественные пробелы
-        text = re.sub(r'\s+', ' ', text)
-        return text
-    
-    # Извлекаем описание (все до примеров)
-    description_parts = []
-    for elem in soup.find_all(['p', 'ul', 'ol']):
-        # Проверяем, не является ли это частью примеров или ограничений
-        elem_text = extract_text_with_formatting(elem)
-        if 'Example' in elem_text or (example_start and elem == example_start):
-            break
-        if 'Constraint' in elem_text or (constraints_start and elem == constraints_start):
-            break
-        
-        if elem.name == 'p':
-            text = extract_text_with_formatting(elem)
-            if text and len(text) > 3:
-                description_parts.append(text)
-        elif elem.name in ['ul', 'ol']:
-            items = []
-            for li in elem.find_all('li'):
-                item_text = extract_text_with_formatting(li)
-                if item_text:
-                    items.append(item_text)
-            if items:
-                description_parts.append("\n".join([f"- {item}" for item in items]))
-    
-    result["description"] = "\n\n".join(description_parts)
-    
-    # Извлекаем примеры - более надежный способ
-    example_pattern = re.compile(r'Example\s+(\d+)', re.I)
-    
-    # Ищем все параграфы с примерами
-    all_ps = soup.find_all('p')
-    i = 0
-    while i < len(all_ps):
-        p = all_ps[i]
-        text = extract_text_with_formatting(p)
-        
-        # Нашли начало примера
-        if example_pattern.search(text):
+        # Проверяем, похоже ли это на пример Input/Output
+        if 'Input:' in text or 'Output:' in text:
             example = {}
-            example_num = example_pattern.search(text).group(1)
             
-            # Ищем Input, Output, Explanation в следующих элементах
-            j = i + 1
-            while j < len(all_ps) and j < i + 15:
-                next_p = all_ps[j]
-                next_text = extract_text_with_formatting(next_p)
+            # Простой парсинг текста внутри pre
+            # Ищем позиции ключей
+            input_idx = text.find('Input:')
+            output_idx = text.find('Output:')
+            expl_idx = text.find('Explanation:')
+            
+            if input_idx != -1:
+                end = output_idx if output_idx != -1 else len(text)
+                val = text[input_idx + 6:end].strip()
+                example["input"] = val
+            
+            if output_idx != -1:
+                end = expl_idx if expl_idx != -1 else len(text)
+                val = text[output_idx + 7:end].strip()
+                example["output"] = val
                 
-                # Проверяем, не начался ли новый пример или ограничения
-                if example_pattern.search(next_text) or 'Constraint' in next_text:
-                    break
-                
-                # Input
-                if 'Input' in next_text and 'input' not in example:
-                    # Ищем следующий <pre> или код в том же параграфе
-                    pre = next_p.find_next('pre')
-                    if pre:
-                        example["input"] = pre.get_text(strip=True)
-                    else:
-                        # Может быть в самом параграфе после "Input:"
-                        input_match = re.search(r'Input:\s*(.+)', next_text, re.I)
-                        if input_match:
-                            example["input"] = input_match.group(1).strip()
-                
-                # Output
-                elif 'Output' in next_text and 'output' not in example:
-                    pre = next_p.find_next('pre')
-                    if pre:
-                        example["output"] = pre.get_text(strip=True)
-                    else:
-                        output_match = re.search(r'Output:\s*(.+)', next_text, re.I)
-                        if output_match:
-                            example["output"] = output_match.group(1).strip()
-                
-                # Explanation
-                elif 'Explanation' in next_text and 'explanation' not in example:
-                    expl_parts = []
-                    k = j + 1
-                    while k < len(all_ps) and k < j + 5:
-                        expl_p = all_ps[k]
-                        expl_text = extract_text_with_formatting(expl_p)
-                        if 'Example' in expl_text or 'Constraint' in expl_text or 'Input' in expl_text or 'Output' in expl_text:
-                            break
-                        if expl_text:
-                            expl_parts.append(expl_text)
-                        k += 1
-                    if expl_parts:
-                        example["explanation"] = " ".join(expl_parts)
-                    else:
-                        # Может быть в самом параграфе
-                        expl_match = re.search(r'Explanation:\s*(.+)', next_text, re.I)
-                        if expl_match:
-                            example["explanation"] = expl_match.group(1).strip()
-                
-                j += 1
+            if expl_idx != -1:
+                val = text[expl_idx + 12:].strip()
+                example["explanation"] = val
             
             if example:
                 result["examples"].append(example)
-            i = j - 1
-        
-        i += 1
+                # Удаляем тег <pre> и предшествующий ему заголовок "Example X", если есть
+                previous = pre.find_previous_sibling()
+                if previous and 'Example' in previous.get_text():
+                    previous.decompose()
+                pre.decompose()
+
+    # 4. Извлечение Ограничений
+    # Ищем заголовок, содержащий "Constraint"
+    constraints_header = None
+    for elem in soup.find_all(['p', 'strong', 'h3']):
+        if 'Constraint' in elem.get_text():
+            constraints_header = elem
+            break
+            
+    if constraints_header:
+        # Ищем список <ul> сразу после заголовка
+        ul_constraints = constraints_header.find_next('ul')
+        if ul_constraints:
+            for li in ul_constraints.find_all('li'):
+                # Очистка текста ограничения
+                cons_text = li.get_text(separator=' ', strip=True)
+                # Исправляем пробелы перед степенями (10 ^4 -> 10^4)
+                cons_text = re.sub(r'(\d)\s+\^', r'\1^', cons_text)
+                # Исправляем пробелы в диапазонах (nums [ i ])
+                cons_text = re.sub(r'(\w)\s+\[\s+(\w)\s+\]', r'\1[\2]', cons_text)
+                result["constraints"].append(cons_text)
+            
+            # Удаляем блок ограничений из супа
+            ul_constraints.decompose()
+            constraints_header.decompose()
+
+    # 5. Все, что осталось - это описание
+    # Используем separator=' ' но потом чистим
+    description_text = soup.get_text(separator='\n\n', strip=True)
     
-    # Извлекаем ограничения с сохранением форматирования
-    for p in all_ps:
-        text = extract_text_with_formatting(p)
-        if 'Constraint' in text:
-            # Ищем следующий <ul>
-            ul = p.find_next('ul')
-            if ul:
-                for li in ul.find_all('li'):
-                    constraint_text = extract_text_with_formatting(li)
-                    if constraint_text:
-                        result["constraints"].append(constraint_text)
-                break
+    # Финальная очистка текста описания
+    # Убираем лишние пробелы перед степенями
+    description_text = re.sub(r'(\d)\s+\^', r'\1^', description_text)
+    # Убираем лишние переносы строк
+    description_text = re.sub(r'\n{3,}', '\n\n', description_text)
     
-    # Если не нашли через параграфы, ищем через strong
-    if not result["constraints"]:
-        for strong in soup.find_all('strong'):
-            if 'Constraint' in extract_text_with_formatting(strong):
-                ul = strong.find_next('ul')
-                if ul:
-                    for li in ul.find_all('li'):
-                        constraint_text = extract_text_with_formatting(li)
-                        if constraint_text:
-                            result["constraints"].append(constraint_text)
-                    break
+    result["description"] = description_text
     
     return result
 
@@ -542,126 +460,66 @@ def format_markdown_content(problem_number: int, slug: Optional[str],
                             parsed_content: dict, is_locked: bool = False) -> str:
     """
     Форматирует структурированные данные в красивый markdown.
-    
-    Args:
-        problem_number: Номер задачи
-        slug: Slug задачи
-        parsed_content: Словарь с parsed данными
-        is_locked: Является ли задача Premium
-        
-    Returns:
-        Отформатированный markdown текст
     """
     title = f"Problem {problem_number}"
     if slug:
-        # Преобразуем slug в читаемое название
         title_parts = slug.replace('-', ' ').title().split()
         title += f" - {' '.join(title_parts)}"
     
     content = f"# {title}\n\n"
     
-    # Ссылка на LeetCode
     if slug:
         leetcode_url = f"https://leetcode.com/problems/{slug}/description/"
         content += f"[🔗 LeetCode Problem]({leetcode_url})\n\n"
     
     if is_locked:
         content += "> **Premium Problem (Locked)**\n\n"
-        content += "Эта задача доступна только с LeetCode Premium подпиской.\n\n"
     
-    # Описание
+    # Описание (теперь содержит и картинки, так как мы их встроили)
+    content += "## 📝 Описание\n\n"
     if parsed_content.get("description"):
-        content += "## 📝 Описание\n\n"
-        description = parsed_content["description"]
-        
-        # Улучшаем форматирование описания
-        # Разделяем на параграфы и форматируем
-        lines = description.split('\n')
-        formatted_lines = []
-        in_list = False
-        
-        for line in lines:
-            line = line.strip()
-            if not line:
-                if in_list:
-                    formatted_lines.append("")
-                    in_list = False
-                continue
-            
-            # Если строка начинается с "- ", это список
-            if line.startswith('- '):
-                if not in_list:
-                    formatted_lines.append("")
-                formatted_lines.append(line)
-                in_list = True
-            elif line.startswith('```'):
-                if in_list:
-                    formatted_lines.append("")
-                    in_list = False
-                formatted_lines.append(line)
-            else:
-                # Обычный текст - добавляем как параграф
-                if in_list:
-                    formatted_lines.append("")
-                    in_list = False
-                formatted_lines.append(line)
-        
-        # Объединяем параграфы
-        formatted_text = '\n'.join(formatted_lines)
-        # Убираем множественные пустые строки
-        formatted_text = re.sub(r'\n{3,}', '\n\n', formatted_text)
-        
-        content += formatted_text
-        content += "\n\n"
+        content += parsed_content["description"]
     else:
-        content += "## 📝 Описание\n\n"
-        content += "*Не удалось получить описание задачи автоматически.*\n\n"
-    
-    # Изображения
-    if parsed_content.get("images"):
-        content += "## 🖼️ Изображения\n\n"
-        for img_url in parsed_content["images"]:
-            content += f"![Image]({img_url})\n\n"
+        content += "*Не удалось получить описание задачи автоматически.*"
+    content += "\n\n"
     
     # Примеры
+    content += "## 💡 Примеры\n\n"
     if parsed_content.get("examples"):
-        content += "## 💡 Примеры\n\n"
         for i, example in enumerate(parsed_content["examples"], 1):
             content += f"### Пример {i}\n\n"
             
             if example.get("input"):
-                content += "**Входные данные:**\n\n"
-                content += "```\n"
-                content += example["input"]
-                content += "\n```\n\n"
+                content += "**Входные данные:**\n"
+                content += f"```\n{example['input']}\n```\n\n"
             
             if example.get("output"):
-                content += "**Выходные данные:**\n\n"
-                content += "```\n"
-                content += example["output"]
-                content += "\n```\n\n"
+                content += "**Выходные данные:**\n"
+                content += f"```\n{example['output']}\n```\n\n"
             
             if example.get("explanation"):
-                content += "**Объяснение:**\n\n"
+                content += "**Объяснение:**\n"
                 content += f"{example['explanation']}\n\n"
             
             content += "---\n\n"
     else:
-        content += "## 💡 Примеры\n\n"
+        # Пустой шаблон, если примеры не спарсились
         content += "```\n"
         content += "Входные данные:\n"
         content += "Выходные данные:\n"
         content += "```\n\n"
     
     # Ограничения
+    content += "## ⚠️ Ограничения\n\n"
     if parsed_content.get("constraints"):
-        content += "## ⚠️ Ограничения\n\n"
         for constraint in parsed_content["constraints"]:
-            content += f"- {constraint}\n"
-        content += "\n"
+            # Экранируем * чтобы не ломать маркдаун, если там есть умножение
+            clean_constraint = constraint.replace('*', '\*')
+            content += f"- {clean_constraint}\n"
     else:
-        content += "## ⚠️ Ограничения\n\n"
-        content += "- \n\n"
+        content += "- \n"
+    
+    content += "\n"
     
     return content
 
