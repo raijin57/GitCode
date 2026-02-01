@@ -293,6 +293,7 @@ def parse_algo_monster_content(html_content: str) -> Optional[dict]:
     # Ищем описание (все до первого заголовка Example)
     description_parts = []
     found_example = False
+    seen_texts = set()  # Для удаления дубликатов
     
     # Собираем все параграфы и списки
     for elem in content_area.find_all(['p', 'ul', 'ol', 'pre', 'h2', 'h3']):
@@ -300,13 +301,20 @@ def parse_algo_monster_content(html_content: str) -> Optional[dict]:
         
         if 'Example' in text and (elem.name in ['h2', 'h3', 'p']):
             found_example = True
+            continue
             
         if not found_example:
             if elem.name == 'p':
-                description_parts.append(text)
+                # Убираем дубликаты
+                if text and text not in seen_texts and len(text) > 10:
+                    description_parts.append(text)
+                    seen_texts.add(text)
             elif elem.name in ['ul', 'ol']:
-                items = [f"- {li.get_text().strip()}" for li in elem.find_all('li')]
-                description_parts.append("\n".join(items))
+                items_text = "\n".join([f"- {li.get_text().strip()}" for li in elem.find_all('li')])
+                # Убираем дубликаты списков
+                if items_text and items_text not in seen_texts:
+                    description_parts.append(items_text)
+                    seen_texts.add(items_text)
         
         # Парсим примеры, если они в блоках <pre>
         if found_example and elem.name == 'pre':
@@ -384,7 +392,9 @@ def parse_leetcode_html_content(html_content: str) -> dict:
     # --- ЭТАП 1: Подготовка контента (превращаем теги в текст) ---
 
     # 1. Картинки -> Markdown
-    # Мы заменяем тег <img> на текстовую строку ![Image](url)
+    # Сохраняем ссылки на изображения, но не заменяем их сразу
+    # Заменим их позже, после извлечения примеров
+    all_images = []
     for img in soup.find_all('img'):
         src = img.get('src', '')
         if src:
@@ -392,9 +402,7 @@ def parse_leetcode_html_content(html_content: str) -> dict:
                 src = f"https://leetcode.com{src}"
             elif not src.startswith('http'):
                 src = f"https://leetcode.com/{src}"
-            
-            # Добавляем переносы строк, чтобы картинка не слиплась с текстом
-            img.replace_with(f"\n\n![Image]({src})\n\n")
+            all_images.append((img, src))
             result["images"].append(src)
 
     # 2. Форматирование -> Markdown
@@ -505,6 +513,14 @@ def parse_leetcode_html_content(html_content: str) -> dict:
             
             if example_images:
                 example["images"] = example_images
+                # Удаляем эти изображения из общего списка и из soup
+                for img_src in example_images:
+                    if img_src in result["images"]:
+                        result["images"].remove(img_src)
+                    # Находим и удаляем соответствующий img тег из soup
+                    for img_tag, saved_src in all_images:
+                        if saved_src == img_src and img_tag in soup:
+                            img_tag.decompose()
             
             if example:
                 result["examples"].append(example)
@@ -515,6 +531,11 @@ def parse_leetcode_html_content(html_content: str) -> dict:
             if previous and 'Example' in previous.get_text():
                 previous.decompose()
             pre.decompose()
+    
+    # Теперь заменяем оставшиеся изображения (которые не связаны с примерами) на markdown
+    for img_tag, src in all_images:
+        if img_tag in soup:  # Если изображение еще не удалено
+            img_tag.replace_with(f"\n\n![Image]({src})\n\n")
 
     # 2. Ограничения
     # Ищем блок ограничений и удаляем его
@@ -596,10 +617,15 @@ def format_markdown_content(problem_number: int, slug: Optional[str],
     if is_locked:
         content += "> **Premium Problem (Locked)**\n\n"
     
-    # Описание (теперь содержит и картинки, так как мы их встроили)
+    # Описание
     content += "## 📝 Описание\n\n"
     if parsed_content.get("description"):
         content += parsed_content["description"]
+        # Добавляем изображения, которые не связаны с примерами
+        if parsed_content.get("images"):
+            content += "\n\n"
+            for img_url in parsed_content["images"]:
+                content += f"![Image]({img_url})\n\n"
     else:
         content += "*Не удалось получить описание задачи автоматически.*"
     content += "\n\n"
@@ -638,10 +664,8 @@ def format_markdown_content(problem_number: int, slug: Optional[str],
     # Ограничения
     content += "## ⚠️ Ограничения\n\n"
     if parsed_content.get("constraints"):
-            for constraint in parsed_content["constraints"]:
-                # Экранируем * чтобы не ломать маркдаун, если там есть умножение
-                clean_constraint = constraint.replace('*', r'\*')
-                content += f"- {clean_constraint}\n"
+        for constraint in parsed_content["constraints"]:
+            content += f"- {constraint}\n"
     else:
         content += "- \n"
     
