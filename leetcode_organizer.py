@@ -424,6 +424,7 @@ def parse_leetcode_html_content(html_content: str) -> dict:
     # --- ЭТАП 2: Извлечение и УДАЛЕНИЕ специальных блоков ---
 
     # 1. Примеры (обычно в <pre>)
+    # Сначала извлекаем изображения, которые могут быть связаны с примерами
     pre_tags = soup.find_all('pre')
     for pre in pre_tags:
         text = pre.get_text(separator='\n').strip()
@@ -443,6 +444,67 @@ def parse_leetcode_html_content(html_content: str) -> dict:
                 
             if expl_idx != -1:
                 example["explanation"] = text[expl_idx + 12:].strip()
+            
+            # Очищаем артефакты форматирования из примеров
+            for key in ["input", "output", "explanation"]:
+                if key in example:
+                    # Убираем артефакты типа "** " в начале и конце
+                    example[key] = re.sub(r'^\s*\*\*\s+', '', example[key])
+                    example[key] = re.sub(r'\s+\*\*\s*$', '', example[key])
+                    example[key] = re.sub(r'^\s*\*\s+', '', example[key])
+                    example[key] = re.sub(r'\s+\*\s*$', '', example[key])
+                    # Убираем множественные пробелы
+                    example[key] = re.sub(r'\s+', ' ', example[key]).strip()
+            
+            # Проверяем, есть ли изображение рядом с этим примером
+            # Ищем изображения в том же контексте, что и пример
+            example_images = []
+            
+            # Ищем изображения перед pre (в предыдущих siblings или в родителе)
+            # Сначала проверяем предыдущие siblings
+            prev_sibling = pre.find_previous_sibling()
+            while prev_sibling:
+                # Если нашли img, добавляем его
+                if prev_sibling.name == 'img':
+                    src = prev_sibling.get('src', '')
+                    if src:
+                        if src.startswith('/'):
+                            src = f"https://leetcode.com{src}"
+                        elif not src.startswith('http'):
+                            src = f"https://leetcode.com/{src}"
+                        example_images.append(src)
+                        if src in result["images"]:
+                            result["images"].remove(src)
+                        prev_sibling.decompose()
+                        break
+                # Если нашли другой pre или заголовок Example, останавливаемся
+                if prev_sibling.name in ['pre', 'h2', 'h3'] or 'Example' in prev_sibling.get_text():
+                    break
+                prev_sibling = prev_sibling.find_previous_sibling()
+            
+            # Также проверяем родительский элемент на наличие img
+            parent = pre.find_parent()
+            if parent:
+                # Ищем img в родителе, которые находятся между этим pre и предыдущим
+                all_imgs = parent.find_all('img')
+                for img in all_imgs:
+                    # Проверяем, находится ли img между предыдущим pre и текущим
+                    prev_pre = pre.find_previous('pre')
+                    if (prev_pre is None or img.find_previous('pre') == prev_pre) and img.find_next('pre') == pre:
+                        src = img.get('src', '')
+                        if src:
+                            if src.startswith('/'):
+                                src = f"https://leetcode.com{src}"
+                            elif not src.startswith('http'):
+                                src = f"https://leetcode.com/{src}"
+                            if src not in example_images:
+                                example_images.append(src)
+                            if src in result["images"]:
+                                result["images"].remove(src)
+                            img.decompose()
+            
+            if example_images:
+                example["images"] = example_images
             
             if example:
                 result["examples"].append(example)
@@ -483,20 +545,34 @@ def parse_leetcode_html_content(html_content: str) -> dict:
     # Теперь soup содержит только описание и картинки, так как
     # примеры и ограничения мы удалили (.decompose())
     
-    raw_desc = soup.get_text(separator="\n", strip=True)
+    # Используем separator=' ' чтобы слова не разбивались на отдельные строки
+    raw_desc = soup.get_text(separator=' ', strip=True)
     
     # Финальная чистка текста
-    lines = []
-    for line in raw_desc.split('\n'):
-        line = line.strip()
-        if not line:
-            continue
-        # Убираем множественные пробелы
-        line = re.sub(r'\s+', ' ', line)
-        lines.append(line)
-        
-    # Собираем обратно
-    result["description"] = "\n\n".join(lines)
+    # Нормализуем пробелы
+    raw_desc = re.sub(r'\s+', ' ', raw_desc)
+    # Разбиваем на параграфы по двойным переносам строк (если они были в оригинале)
+    # Но сначала нужно сохранить структуру параграфов
+    
+    # Лучший подход: извлекаем текст из каждого параграфа отдельно
+    description_parts = []
+    for p in soup.find_all(['p', 'div']):
+        p_text = p.get_text(separator=' ', strip=True)
+        if p_text and len(p_text) > 3:
+            # Проверяем, не является ли это изображением (уже обработанным)
+            if not p_text.startswith('!['):
+                # Нормализуем пробелы
+                p_text = re.sub(r'\s+', ' ', p_text)
+                description_parts.append(p_text)
+    
+    # Если не нашли параграфы, используем весь текст
+    if not description_parts:
+        raw_desc = soup.get_text(separator=' ', strip=True)
+        raw_desc = re.sub(r'\s+', ' ', raw_desc)
+        description_parts = [raw_desc] if raw_desc else []
+    
+    # Собираем обратно, разделяя параграфы
+    result["description"] = "\n\n".join(description_parts)
     
     return result
 
@@ -533,6 +609,11 @@ def format_markdown_content(problem_number: int, slug: Optional[str],
     if parsed_content.get("examples"):
         for i, example in enumerate(parsed_content["examples"], 1):
             content += f"### Пример {i}\n\n"
+            
+            # Изображения для этого примера (если есть)
+            if example.get("images"):
+                for img_url in example["images"]:
+                    content += f"![Image]({img_url})\n\n"
             
             if example.get("input"):
                 content += "**Входные данные:**\n"
