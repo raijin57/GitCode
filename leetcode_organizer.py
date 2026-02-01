@@ -19,7 +19,7 @@ from typing import Optional, Tuple
 
 
 # Конфигурация
-LEETCODE_PROBLEMS_PATH = "/home/arsen/CLionProjects/LeetCodeProblems"
+LEETCODE_PROBLEMS_PATH = "/home/arsen/CLionProjects/test"
 
 
 def extract_problem_number(filename: str) -> Optional[int]:
@@ -261,11 +261,8 @@ def get_leetcode_problem_description(slug: str) -> Optional[str]:
             print(f"Не найдено описание для slug: {slug}")
             return None
         
-        # Очищаем HTML теги
-        soup = BeautifulSoup(content, 'html.parser')
-        description = soup.get_text(separator='\n', strip=True)
-        
-        return description
+        # Возвращаем HTML контент для дальнейшего парсинга
+        return content
             
     except requests.exceptions.RequestException as e:
         print(f"Ошибка при запросе к GraphQL API: {e}")
@@ -345,6 +342,333 @@ def get_algo_monster_problem(problem_number: int, slug: Optional[str] = None) ->
     
     print(f"Не удалось получить условие задачи {problem_number} с algo.monster")
     return None
+
+
+def parse_leetcode_html_content(html_content: str) -> dict:
+    """
+    Парсит HTML контент задачи LeetCode и извлекает структурированную информацию.
+    
+    Args:
+        html_content: HTML контент задачи
+        
+    Returns:
+        Словарь с ключами: description, examples, constraints, images
+    """
+    soup = BeautifulSoup(html_content, 'html.parser')
+    
+    result = {
+        "description": "",
+        "examples": [],
+        "constraints": [],
+        "images": []
+    }
+    
+    # Извлекаем изображения
+    for img in soup.find_all('img'):
+        src = img.get('src', '')
+        if src:
+            # Преобразуем относительные URL в абсолютные
+            if src.startswith('/'):
+                src = f"https://leetcode.com{src}"
+            elif not src.startswith('http'):
+                src = f"https://leetcode.com/{src}"
+            result["images"].append(src)
+    
+    # Разделяем контент на части: описание, примеры, ограничения
+    # LeetCode обычно структурирует так: параграфы -> Примеры -> Ограничения
+    
+    # Находим все параграфы
+    all_paragraphs = soup.find_all('p')
+    all_strong = soup.find_all('strong')
+    
+    # Ищем начало примеров (обычно "Example 1:" или просто "Example")
+    example_start_idx = -1
+    constraints_start_idx = -1
+    
+    for i, p in enumerate(all_paragraphs):
+        text = p.get_text(strip=True)
+        if re.match(r'Example\s+\d+', text, re.I) or text.startswith('Example'):
+            example_start_idx = i
+            break
+    
+    # Ищем начало ограничений
+    for i, p in enumerate(all_paragraphs):
+        text = p.get_text(strip=True)
+        if 'Constraint' in text:
+            constraints_start_idx = i
+            break
+    
+    # Извлекаем описание (все параграфы до примеров)
+    description_parts = []
+    end_idx = example_start_idx if example_start_idx != -1 else (constraints_start_idx if constraints_start_idx != -1 else len(all_paragraphs))
+    
+    for i in range(end_idx):
+        p = all_paragraphs[i]
+        text = p.get_text(strip=True)
+        if text and len(text) > 3:
+            # Проверяем, не является ли это частью примера или ограничений
+            if 'Example' in text or 'Constraint' in text:
+                break
+            description_parts.append(text)
+    
+    # Также добавляем списки и другие элементы из описания
+    for ul in soup.find_all(['ul', 'ol']):
+        # Проверяем, не является ли это частью ограничений
+        parent_text = ul.find_parent().get_text() if ul.find_parent() else ""
+        if 'Constraint' not in parent_text and 'Example' not in parent_text:
+            items = [li.get_text(strip=True) for li in ul.find_all('li')]
+            if items:
+                description_parts.append("\n".join([f"- {item}" for item in items]))
+    
+    result["description"] = "\n\n".join(description_parts)
+    
+    # Извлекаем примеры - ищем структуру с <strong>Example X:</strong> и следующими <pre>
+    example_pattern = re.compile(r'Example\s+(\d+)', re.I)
+    
+    current_example = None
+    current_key = None
+    
+    for element in soup.find_all(['p', 'strong', 'pre']):
+        text = element.get_text(strip=True)
+        
+        # Начало нового примера
+        if element.name == 'strong' and example_pattern.match(text):
+            if current_example:
+                result["examples"].append(current_example)
+            current_example = {}
+            current_key = None
+        
+        # Input
+        elif element.name == 'strong' and 'Input' in text and 'Output' not in text:
+            current_key = "input"
+        
+        # Output
+        elif element.name == 'strong' and 'Output' in text:
+            current_key = "output"
+        
+        # Explanation
+        elif element.name == 'strong' and 'Explanation' in text:
+            current_key = "explanation"
+        
+        # Данные для текущего ключа
+        elif element.name == 'pre' and current_key and current_example is not None:
+            code_text = element.get_text()
+            current_example[current_key] = code_text
+            current_key = None
+        
+        # Текст для explanation (может быть не в <pre>)
+        elif current_key == "explanation" and element.name == 'p' and current_example is not None:
+            if current_key not in current_example:
+                current_example[current_key] = text
+            else:
+                current_example[current_key] += " " + text
+    
+    # Добавляем последний пример
+    if current_example:
+        result["examples"].append(current_example)
+    
+    # Альтернативный способ: ищем через структуру параграфов
+    if not result["examples"]:
+        for i, p in enumerate(all_paragraphs):
+            text = p.get_text(strip=True)
+            if example_pattern.match(text):
+                example = {}
+                # Ищем следующие параграфы с Input, Output, Explanation
+                j = i + 1
+                while j < len(all_paragraphs) and j < i + 10:  # Ищем в следующих 10 параграфах
+                    next_p = all_paragraphs[j]
+                    next_text = next_p.get_text(strip=True)
+                    
+                    if 'Input' in next_text and 'input' not in example:
+                        # Ищем следующий <pre>
+                        next_pre = next_p.find_next('pre')
+                        if next_pre:
+                            example["input"] = next_pre.get_text()
+                    
+                    elif 'Output' in next_text and 'output' not in example:
+                        next_pre = next_p.find_next('pre')
+                        if next_pre:
+                            example["output"] = next_pre.get_text()
+                    
+                    elif 'Explanation' in next_text and 'explanation' not in example:
+                        # Explanation может быть просто текстом
+                        explanation_parts = []
+                        k = j + 1
+                        while k < len(all_paragraphs) and k < j + 5:
+                            expl_p = all_paragraphs[k]
+                            expl_text = expl_p.get_text(strip=True)
+                            if 'Constraint' in expl_text or example_pattern.match(expl_text):
+                                break
+                            if expl_text:
+                                explanation_parts.append(expl_text)
+                            k += 1
+                        if explanation_parts:
+                            example["explanation"] = " ".join(explanation_parts)
+                    
+                    j += 1
+                
+                if example:
+                    result["examples"].append(example)
+    
+    # Извлекаем ограничения
+    for strong in all_strong:
+        if 'Constraint' in strong.get_text():
+            # Ищем следующий <ul>
+            ul = strong.find_next('ul')
+            if ul:
+                for li in ul.find_all('li'):
+                    constraint_text = li.get_text(strip=True)
+                    if constraint_text:
+                        result["constraints"].append(constraint_text)
+                break
+    
+    # Если не нашли через strong, ищем через параграфы
+    if not result["constraints"]:
+        for p in all_paragraphs:
+            if 'Constraint' in p.get_text():
+                ul = p.find_next('ul')
+                if ul:
+                    for li in ul.find_all('li'):
+                        constraint_text = li.get_text(strip=True)
+                        if constraint_text:
+                            result["constraints"].append(constraint_text)
+                    break
+    
+    return result
+
+
+def format_markdown_content(problem_number: int, slug: Optional[str], 
+                            parsed_content: dict, is_locked: bool = False) -> str:
+    """
+    Форматирует структурированные данные в красивый markdown.
+    
+    Args:
+        problem_number: Номер задачи
+        slug: Slug задачи
+        parsed_content: Словарь с parsed данными
+        is_locked: Является ли задача Premium
+        
+    Returns:
+        Отформатированный markdown текст
+    """
+    title = f"Problem {problem_number}"
+    if slug:
+        # Преобразуем slug в читаемое название
+        title_parts = slug.replace('-', ' ').title().split()
+        title += f" - {' '.join(title_parts)}"
+    
+    content = f"# {title}\n\n"
+    
+    # Ссылка на LeetCode
+    if slug:
+        leetcode_url = f"https://leetcode.com/problems/{slug}/description/"
+        content += f"[🔗 LeetCode Problem]({leetcode_url})\n\n"
+    
+    if is_locked:
+        content += "> **Premium Problem (Locked)**\n\n"
+        content += "Эта задача доступна только с LeetCode Premium подпиской.\n\n"
+    
+    # Описание
+    if parsed_content.get("description"):
+        content += "## 📝 Описание\n\n"
+        description = parsed_content["description"]
+        
+        # Улучшаем форматирование описания
+        # Разделяем на параграфы и форматируем
+        lines = description.split('\n')
+        formatted_lines = []
+        in_list = False
+        
+        for line in lines:
+            line = line.strip()
+            if not line:
+                if in_list:
+                    formatted_lines.append("")
+                    in_list = False
+                continue
+            
+            # Если строка начинается с "- ", это список
+            if line.startswith('- '):
+                if not in_list:
+                    formatted_lines.append("")
+                formatted_lines.append(line)
+                in_list = True
+            elif line.startswith('```'):
+                if in_list:
+                    formatted_lines.append("")
+                    in_list = False
+                formatted_lines.append(line)
+            else:
+                # Обычный текст - добавляем как параграф
+                if in_list:
+                    formatted_lines.append("")
+                    in_list = False
+                formatted_lines.append(line)
+        
+        # Объединяем параграфы
+        formatted_text = '\n'.join(formatted_lines)
+        # Убираем множественные пустые строки
+        formatted_text = re.sub(r'\n{3,}', '\n\n', formatted_text)
+        
+        content += formatted_text
+        content += "\n\n"
+    else:
+        content += "## 📝 Описание\n\n"
+        content += "*Не удалось получить описание задачи автоматически.*\n\n"
+    
+    # Изображения
+    if parsed_content.get("images"):
+        content += "## 🖼️ Изображения\n\n"
+        for img_url in parsed_content["images"]:
+            content += f"![Image]({img_url})\n\n"
+    
+    # Примеры
+    if parsed_content.get("examples"):
+        content += "## 💡 Примеры\n\n"
+        for i, example in enumerate(parsed_content["examples"], 1):
+            content += f"### Пример {i}\n\n"
+            
+            if example.get("input"):
+                content += "**Входные данные:**\n\n"
+                content += "```\n"
+                content += example["input"]
+                content += "\n```\n\n"
+            
+            if example.get("output"):
+                content += "**Выходные данные:**\n\n"
+                content += "```\n"
+                content += example["output"]
+                content += "\n```\n\n"
+            
+            if example.get("explanation"):
+                content += "**Объяснение:**\n\n"
+                content += f"{example['explanation']}\n\n"
+            
+            content += "---\n\n"
+    else:
+        content += "## 💡 Примеры\n\n"
+        content += "```\n"
+        content += "Входные данные:\n"
+        content += "Выходные данные:\n"
+        content += "```\n\n"
+    
+    # Ограничения
+    if parsed_content.get("constraints"):
+        content += "## ⚠️ Ограничения\n\n"
+        for constraint in parsed_content["constraints"]:
+            content += f"- {constraint}\n"
+        content += "\n"
+    else:
+        content += "## ⚠️ Ограничения\n\n"
+        content += "- \n\n"
+    
+    # Решение
+    content += "## 💻 Решение\n\n"
+    content += f"```cpp\n"
+    content += f"// Ваш код находится в {problem_number}.cpp\n"
+    content += "```\n"
+    
+    return content
 
 
 def create_locked_problem_template(problem_number: int, slug: Optional[str] = None) -> str:
@@ -458,7 +782,7 @@ def create_markdown_file(problem_dir: Path, problem_number: int,
     Args:
         problem_dir: Директория задачи
         problem_number: Номер задачи
-        description: Текст условия задачи (None для Locked задач без описания)
+        description: HTML контент условия задачи (None для Locked задач без описания)
         slug: Slug задачи (опционально)
         is_locked: Является ли задача Premium
         
@@ -477,53 +801,19 @@ def create_markdown_file(problem_dir: Path, problem_number: int,
             # Создаем шаблон для Locked задачи
             content = create_locked_problem_template(problem_number, slug)
         else:
-            # Создаем .md файл с условием
-            title = f"Problem {problem_number}"
-            if slug:
-                title += f" - {slug.replace('-', ' ').title()}"
-            
-            leetcode_url = f"https://leetcode.com/problems/{slug}/description/" if slug else ""
-            
-            content = f"""# {title}
-
-"""
-            
-            if leetcode_url:
-                content += f"[LeetCode Problem]({leetcode_url})\n\n"
-            
-            if is_locked:
-                content += "## Premium Problem (Locked)\n\n"
-            
+            # Парсим HTML контент
             if description:
-                content += f"""## Описание
-
-{description}
-
-"""
+                parsed_content = parse_leetcode_html_content(description)
             else:
-                content += """## Описание
-
-*Не удалось получить описание задачи автоматически.*
-
-"""
+                parsed_content = {
+                    "description": "",
+                    "examples": [],
+                    "constraints": [],
+                    "images": []
+                }
             
-            content += """## Примеры
-
-```
-Входные данные:
-Выходные данные:
-```
-
-## Ограничения
-
-- 
-
-## Решение
-
-```cpp
-// Ваш код находится в {problem_number}.cpp
-```
-"""
+            # Форматируем в markdown
+            content = format_markdown_content(problem_number, slug, parsed_content, is_locked)
         
         md_file.write_text(content, encoding='utf-8')
         print(f"  Создан: {md_file}")
@@ -531,6 +821,8 @@ def create_markdown_file(problem_dir: Path, problem_number: int,
         
     except Exception as e:
         print(f"  Ошибка при создании .md файла: {e}")
+        import traceback
+        traceback.print_exc()
         return False
 
 
