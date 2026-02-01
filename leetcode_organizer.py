@@ -630,10 +630,11 @@ def format_markdown_content(problem_number: int, slug: Optional[str],
         content += "*Не удалось получить описание задачи автоматически.*"
     content += "\n\n"
     
-    # Примеры
-    content += "## 💡 Примеры\n\n"
-    if parsed_content.get("examples"):
-        for i, example in enumerate(parsed_content["examples"], 1):
+    # Примеры (только если есть данные)
+    examples = parsed_content.get("examples", [])
+    if examples:
+        content += "## 💡 Примеры\n\n"
+        for i, example in enumerate(examples, 1):
             content += f"### Пример {i}\n\n"
             
             # Изображения для этого примера (если есть)
@@ -654,22 +655,14 @@ def format_markdown_content(problem_number: int, slug: Optional[str],
                 content += f"{example['explanation']}\n\n"
             
             content += "---\n\n"
-    else:
-        # Пустой шаблон, если примеры не спарсились
-        content += "```\n"
-        content += "Входные данные:\n"
-        content += "Выходные данные:\n"
-        content += "```\n\n"
     
-    # Ограничения
-    content += "## ⚠️ Ограничения\n\n"
-    if parsed_content.get("constraints"):
-        for constraint in parsed_content["constraints"]:
+    # Ограничения (только если есть данные)
+    constraints = parsed_content.get("constraints", [])
+    if constraints:
+        content += "## ⚠️ Ограничения\n\n"
+        for constraint in constraints:
             content += f"- {constraint}\n"
-    else:
-        content += "- \n"
-    
-    content += "\n"
+        content += "\n"
     
     return content
 
