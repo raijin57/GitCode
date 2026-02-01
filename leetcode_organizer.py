@@ -404,6 +404,132 @@ def create_locked_problem_template(problem_number: int, slug: Optional[str] = No
     return template
 
 
+def create_problem_directory(base_path: str, problem_number: int) -> Path:
+    """
+    Создает папку для задачи с номером.
+    
+    Args:
+        base_path: Базовый путь к директории с задачами
+        problem_number: Номер задачи
+        
+    Returns:
+        Путь к созданной папке
+    """
+    problem_dir = Path(base_path) / str(problem_number)
+    problem_dir.mkdir(exist_ok=True)
+    return problem_dir
+
+
+def move_cpp_file(cpp_file_path: Path, target_dir: Path) -> bool:
+    """
+    Перемещает .cpp файл в целевую директорию.
+    
+    Args:
+        cpp_file_path: Путь к исходному .cpp файлу
+        target_dir: Целевая директория
+        
+    Returns:
+        True если успешно, False при ошибке
+    """
+    try:
+        target_file = target_dir / cpp_file_path.name
+        if target_file.exists():
+            print(f"  Предупреждение: файл {target_file} уже существует, пропускаем перемещение")
+            return False
+        
+        shutil.move(str(cpp_file_path), str(target_file))
+        print(f"  Перемещен: {cpp_file_path.name} -> {target_dir / cpp_file_path.name}")
+        return True
+    except Exception as e:
+        print(f"  Ошибка при перемещении файла {cpp_file_path}: {e}")
+        return False
+
+
+def create_markdown_file(problem_dir: Path, problem_number: int, 
+                         description: Optional[str], slug: Optional[str] = None,
+                         is_locked: bool = False) -> bool:
+    """
+    Создает .md файл с условием задачи.
+    
+    Args:
+        problem_dir: Директория задачи
+        problem_number: Номер задачи
+        description: Текст условия задачи (None для Locked задач без описания)
+        slug: Slug задачи (опционально)
+        is_locked: Является ли задача Premium
+        
+    Returns:
+        True если успешно, False при ошибке
+    """
+    md_file = problem_dir / f"{problem_number}.md"
+    
+    # Если файл уже существует, пропускаем
+    if md_file.exists():
+        print(f"  Предупреждение: файл {md_file} уже существует, пропускаем создание")
+        return False
+    
+    try:
+        if is_locked and not description:
+            # Создаем шаблон для Locked задачи
+            content = create_locked_problem_template(problem_number, slug)
+        else:
+            # Создаем .md файл с условием
+            title = f"Problem {problem_number}"
+            if slug:
+                title += f" - {slug.replace('-', ' ').title()}"
+            
+            leetcode_url = f"https://leetcode.com/problems/{slug}/description/" if slug else ""
+            
+            content = f"""# {title}
+
+"""
+            
+            if leetcode_url:
+                content += f"[LeetCode Problem]({leetcode_url})\n\n"
+            
+            if is_locked:
+                content += "## Premium Problem (Locked)\n\n"
+            
+            if description:
+                content += f"""## Описание
+
+{description}
+
+"""
+            else:
+                content += """## Описание
+
+*Не удалось получить описание задачи автоматически.*
+
+"""
+            
+            content += """## Примеры
+
+```
+Входные данные:
+Выходные данные:
+```
+
+## Ограничения
+
+- 
+
+## Решение
+
+```cpp
+// Ваш код находится в {problem_number}.cpp
+```
+"""
+        
+        md_file.write_text(content, encoding='utf-8')
+        print(f"  Создан: {md_file}")
+        return True
+        
+    except Exception as e:
+        print(f"  Ошибка при создании .md файла: {e}")
+        return False
+
+
 if __name__ == "__main__":
     print("LeetCode File Organizer")
     print("=" * 50)
