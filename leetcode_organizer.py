@@ -134,7 +134,11 @@ def get_problem_slug(problem_number: int) -> Optional[str]:
     
     headers = {
         "Content-Type": "application/json",
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://leetcode.com/problemset/",
+        "Origin": "https://leetcode.com"
     }
     
     try:
@@ -195,7 +199,7 @@ def get_problem_slug(problem_number: int) -> Optional[str]:
 
 def get_leetcode_problem_description(slug: str) -> Optional[str]:
     """
-    Получает условие задачи с LeetCode через веб-скрапинг.
+    Получает условие задачи с LeetCode через GraphQL API.
     
     Args:
         slug: Slug задачи (например, "two-sum")
@@ -203,68 +207,68 @@ def get_leetcode_problem_description(slug: str) -> Optional[str]:
     Returns:
         Текст условия задачи или None при ошибке
     """
-    url = f"https://leetcode.com/problems/{slug}/description/"
+    graphql_url = "https://leetcode.com/graphql/"
+    
+    # GraphQL запрос для получения полного описания задачи
+    query = """
+    query questionContent($titleSlug: String!) {
+      question(titleSlug: $titleSlug) {
+        content
+        mysqlSchemas
+        dataSchemas
+      }
+    }
+    """
+    
+    variables = {
+        "titleSlug": slug
+    }
     
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5"
+        "Content-Type": "application/json",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": f"https://leetcode.com/problems/{slug}/",
+        "Origin": "https://leetcode.com"
     }
     
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.post(
+            graphql_url,
+            json={"query": query, "variables": variables},
+            headers=headers,
+            timeout=10
+        )
         
         if response.status_code != 200:
-            print(f"Ошибка при запросе к LeetCode: {response.status_code}")
+            print(f"Ошибка при запросе к GraphQL API: {response.status_code}")
             return None
         
-        soup = BeautifulSoup(response.content, 'lxml')
+        data = response.json()
         
-        # Ищем описание задачи
-        # LeetCode использует различные селекторы, попробуем несколько вариантов
-        description = None
-        
-        # Вариант 1: ищем в div с классом description
-        desc_div = soup.find('div', class_='description')
-        if desc_div:
-            description = desc_div.get_text(strip=True)
-        
-        # Вариант 2: ищем в meta тегах или других местах
-        if not description:
-            # Попробуем найти через data-атрибуты или другие селекторы
-            content_div = soup.find('div', {'data-track-load': 'description_content'})
-            if content_div:
-                description = content_div.get_text(strip=True)
-        
-        # Вариант 3: попробуем найти через GraphQL данные в скриптах
-        if not description:
-            scripts = soup.find_all('script')
-            for script in scripts:
-                if script.string and 'questionContent' in script.string:
-                    # Парсим JSON данные из скрипта
-                    import json
-                    try:
-                        # Ищем JSON данные в скрипте
-                        content_match = re.search(r'questionContent["\']?\s*:\s*["\']([^"\']+)', script.string)
-                        if content_match:
-                            description = content_match.group(1)
-                            break
-                    except:
-                        pass
-        
-        if description:
-            # Очищаем HTML теги если они есть
-            if '<' in description:
-                desc_soup = BeautifulSoup(description, 'html.parser')
-                description = desc_soup.get_text(separator='\n', strip=True)
-            
-            return description
-        else:
-            print(f"Не удалось найти описание задачи для slug: {slug}")
+        if "errors" in data:
+            print(f"Ошибка GraphQL: {data['errors']}")
             return None
+        
+        question_data = data.get("data", {}).get("question")
+        if not question_data:
+            print(f"Не найдены данные задачи для slug: {slug}")
+            return None
+        
+        content = question_data.get("content")
+        if not content:
+            print(f"Не найдено описание для slug: {slug}")
+            return None
+        
+        # Очищаем HTML теги
+        soup = BeautifulSoup(content, 'html.parser')
+        description = soup.get_text(separator='\n', strip=True)
+        
+        return description
             
     except requests.exceptions.RequestException as e:
-        print(f"Ошибка при запросе к LeetCode: {e}")
+        print(f"Ошибка при запросе к GraphQL API: {e}")
         return None
     except Exception as e:
         print(f"Неожиданная ошибка при парсинге: {e}")
