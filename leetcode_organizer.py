@@ -271,82 +271,106 @@ def get_leetcode_problem_description(slug: str) -> Optional[str]:
         return None
 
 
-def get_algo_monster_problem(problem_number: int, slug: Optional[str] = None) -> Optional[str]:
+def parse_algo_monster_content(html_content: str) -> Optional[dict]:
     """
-    Получает условие Premium задачи с algo.monster.
+    Специфический парсер для структуры algo.monster/liteproblems.
+    Пытается привести данные к тому же формату, что и LeetCode.
+    """
+    soup = BeautifulSoup(html_content, 'html.parser')
     
-    Args:
-        problem_number: Номер задачи
-        slug: Slug задачи (опционально, для более точного поиска)
+    # В liteproblems основной контент обычно в теге <article> или основном контейнере
+    content_area = soup.find('article') or soup.find('main')
+    if not content_area:
+        return None
+
+    result = {
+        "description": "",
+        "examples": [],
+        "constraints": [],
+        "images": []
+    }
+
+    # Ищем описание (все до первого заголовка Example)
+    description_parts = []
+    found_example = False
+    
+    # Собираем все параграфы и списки
+    for elem in content_area.find_all(['p', 'ul', 'ol', 'pre', 'h2', 'h3']):
+        text = elem.get_text().strip()
         
-    Returns:
-        Текст условия задачи или None при ошибке
+        if 'Example' in text and (elem.name in ['h2', 'h3', 'p']):
+            found_example = True
+            
+        if not found_example:
+            if elem.name == 'p':
+                description_parts.append(text)
+            elif elem.name in ['ul', 'ol']:
+                items = [f"- {li.get_text().strip()}" for li in elem.find_all('li')]
+                description_parts.append("\n".join(items))
+        
+        # Парсим примеры, если они в блоках <pre>
+        if found_example and elem.name == 'pre':
+            # Пытаемся разделить Input/Output если они внутри одного pre
+            raw_pre = elem.get_text().strip()
+            example = {"input": "", "output": "", "explanation": ""}
+            
+            if "Input:" in raw_pre:
+                parts = raw_pre.split("Output:")
+                example["input"] = parts[0].replace("Input:", "").strip()
+                if len(parts) > 1:
+                    if "Explanation:" in parts[1]:
+                        sub_parts = parts[1].split("Explanation:")
+                        example["output"] = sub_parts[0].strip()
+                        example["explanation"] = sub_parts[1].strip()
+                    else:
+                        example["output"] = parts[1].strip()
+            
+            if example["input"] or example["output"]:
+                result["examples"].append(example)
+
+        # Ограничения (обычно в конце)
+        if 'Constraints' in text:
+            ul = elem.find_next('ul')
+            if ul:
+                result["constraints"] = [li.get_text().strip() for li in ul.find_all('li')]
+
+    result["description"] = "\n\n".join(description_parts)
+    return result
+
+def get_algo_monster_problem(problem_number: int, slug: Optional[str] = None) -> Optional[dict]:
     """
-    # Пробуем разные варианты URL на algo.monster
-    urls_to_try = []
-    
+    Получает данные Premium задачи с algo.monster/liteproblems.
+    Возвращает словарь (как parse_leetcode_html_content), а не просто текст.
+    """
+    urls_to_try = [
+        f"https://algo.monster/liteproblems/{problem_number}",
+        f"https://algo.monster/problems/leetcode-{problem_number}",
+    ]
     if slug:
-        urls_to_try.append(f"https://algo.monster/problems/{slug}")
-        urls_to_try.append(f"https://algo.monster/lc/{slug}")
-    
-    urls_to_try.append(f"https://algo.monster/problems/{problem_number}")
-    urls_to_try.append(f"https://algo.monster/lc/{problem_number}")
-    urls_to_try.append(f"https://algo.monster/problems/leetcode-{problem_number}")
-    
+        urls_to_try.insert(0, f"https://algo.monster/liteproblems/{slug}")
+
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5"
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
     for url in urls_to_try:
         try:
-            response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
-            
+            response = requests.get(url, headers=headers, timeout=10)
             if response.status_code == 200:
-                soup = BeautifulSoup(response.content, 'lxml')
-                
-                # Ищем описание задачи на algo.monster
-                # Структура может отличаться, пробуем разные селекторы
-                description = None
-                
-                # Вариант 1: ищем в основных контентных блоках
-                content_divs = soup.find_all(['div', 'article', 'section'], class_=re.compile(r'content|description|problem|question', re.I))
-                for div in content_divs:
-                    text = div.get_text(strip=True)
-                    if len(text) > 100:  # Достаточно длинный текст, вероятно описание
-                        description = text
-                        break
-                
-                # Вариант 2: ищем в main контенте
-                if not description:
-                    main = soup.find('main')
-                    if main:
-                        description = main.get_text(separator='\n', strip=True)
-                
-                # Вариант 3: ищем в article
-                if not description:
-                    article = soup.find('article')
-                    if article:
-                        description = article.get_text(separator='\n', strip=True)
-                
-                if description and len(description) > 50:
-                    return description
-                    
-        except requests.exceptions.RequestException:
-            continue  # Пробуем следующий URL
+                print(f"  Успешно открыт URL: {url}")
+                parsed_data = parse_algo_monster_content(response.text)
+                if parsed_data and (parsed_data["description"] or parsed_data["examples"]):
+                    return parsed_data
         except Exception as e:
-            print(f"Ошибка при парсинге algo.monster ({url}): {e}")
             continue
-    
-    print(f"Не удалось получить условие задачи {problem_number} с algo.monster")
+            
     return None
 
 
 def parse_leetcode_html_content(html_content: str) -> dict:
     """
-    Парсит HTML контент задачи LeetCode и извлекает структурированную информацию.
-    Улучшенная версия с поддержкой inline-картинок и правильных степеней.
+    Парсит HTML контент задачи LeetCode.
+    Версия 'Nuclear': сохраняет всё (фото, таблицы), удаляя только примеры и ограничения.
     """
     soup = BeautifulSoup(html_content, 'html.parser')
     
@@ -354,10 +378,13 @@ def parse_leetcode_html_content(html_content: str) -> dict:
         "description": "",
         "examples": [],
         "constraints": [],
-        "images": [] # Оставляем для совместимости, но картинки будут в description
+        "images": []
     }
     
-    # 1. Обработка изображений (превращаем их сразу в Markdown внутри HTML)
+    # --- ЭТАП 1: Подготовка контента (превращаем теги в текст) ---
+
+    # 1. Картинки -> Markdown
+    # Мы заменяем тег <img> на текстовую строку ![Image](url)
     for img in soup.find_all('img'):
         src = img.get('src', '')
         if src:
@@ -365,93 +392,111 @@ def parse_leetcode_html_content(html_content: str) -> dict:
                 src = f"https://leetcode.com{src}"
             elif not src.startswith('http'):
                 src = f"https://leetcode.com/{src}"
-            # Заменяем тег img на markdown строку
-            img.replace_with(f"\n![Image]({src})\n")
-            result["images"].append(src) # На всякий случай сохраняем в список
+            
+            # Добавляем переносы строк, чтобы картинка не слиплась с текстом
+            img.replace_with(f"\n\n![Image]({src})\n\n")
+            result["images"].append(src)
 
-    # 2. Обработка sup/sub (степени и индексы)
-    # Заменяем прямо в дереве, чтобы сохранить позицию
+    # 2. Форматирование -> Markdown
+    # Код
+    for code in soup.find_all('code'):
+        code.replace_with(f" `{code.get_text().strip()}` ")
+    
+    # Жирный текст
+    for strong in soup.find_all(['strong', 'b']):
+        strong.replace_with(f" **{strong.get_text().strip()}** ")
+        
+    # Курсив
+    for em in soup.find_all(['em', 'i']):
+        em.replace_with(f" *{em.get_text().strip()}* ")
+        
+    # Списки (превращаем li в текст с дефисом)
+    for li in soup.find_all('li'):
+        # Если li еще не обработан (например, не удален в ограничениях)
+        li.insert_before("- ")
+
+    # Степени и индексы
     for sup in soup.find_all('sup'):
         sup.replace_with(f"^{sup.get_text().strip()}")
-    
     for sub in soup.find_all('sub'):
         sub.replace_with(f"_{sub.get_text().strip()}")
 
-    # 3. Извлечение Примеров (обычно они в тегах <pre>)
-    # Мы ищем <pre>, извлекаем из них данные, а затем удаляем из супа, 
-    # чтобы они не попали в общее описание
+    # --- ЭТАП 2: Извлечение и УДАЛЕНИЕ специальных блоков ---
+
+    # 1. Примеры (обычно в <pre>)
     pre_tags = soup.find_all('pre')
     for pre in pre_tags:
         text = pre.get_text(separator='\n').strip()
-        
-        # Проверяем, похоже ли это на пример Input/Output
         if 'Input:' in text or 'Output:' in text:
             example = {}
-            
-            # Простой парсинг текста внутри pre
-            # Ищем позиции ключей
             input_idx = text.find('Input:')
             output_idx = text.find('Output:')
             expl_idx = text.find('Explanation:')
             
             if input_idx != -1:
                 end = output_idx if output_idx != -1 else len(text)
-                val = text[input_idx + 6:end].strip()
-                example["input"] = val
+                example["input"] = text[input_idx + 6:end].strip()
             
             if output_idx != -1:
                 end = expl_idx if expl_idx != -1 else len(text)
-                val = text[output_idx + 7:end].strip()
-                example["output"] = val
+                example["output"] = text[output_idx + 7:end].strip()
                 
             if expl_idx != -1:
-                val = text[expl_idx + 12:].strip()
-                example["explanation"] = val
+                example["explanation"] = text[expl_idx + 12:].strip()
             
             if example:
                 result["examples"].append(example)
-                # Удаляем тег <pre> и предшествующий ему заголовок "Example X", если есть
-                previous = pre.find_previous_sibling()
-                if previous and 'Example' in previous.get_text():
-                    previous.decompose()
-                pre.decompose()
+                
+            # Удаляем сам блок примера из дерева
+            # Также пытаемся удалить заголовок "Example 1:", если он есть перед pre
+            previous = pre.find_previous_sibling()
+            if previous and 'Example' in previous.get_text():
+                previous.decompose()
+            pre.decompose()
 
-    # 4. Извлечение Ограничений
-    # Ищем заголовок, содержащий "Constraint"
+    # 2. Ограничения
+    # Ищем блок ограничений и удаляем его
     constraints_header = None
-    for elem in soup.find_all(['p', 'strong', 'h3']):
+    for elem in soup.find_all(['p', 'strong', 'h3', 'div']):
         if 'Constraint' in elem.get_text():
             constraints_header = elem
             break
             
     if constraints_header:
-        # Ищем список <ul> сразу после заголовка
         ul_constraints = constraints_header.find_next('ul')
         if ul_constraints:
             for li in ul_constraints.find_all('li'):
-                # Очистка текста ограничения
                 cons_text = li.get_text(separator=' ', strip=True)
-                # Исправляем пробелы перед степенями (10 ^4 -> 10^4)
+                # Чистим артефакты ("- " который мы добавили выше)
+                cons_text = cons_text.replace("- ", "", 1).strip()
+                # Фиксы форматирования
                 cons_text = re.sub(r'(\d)\s+\^', r'\1^', cons_text)
-                # Исправляем пробелы в диапазонах (nums [ i ])
                 cons_text = re.sub(r'(\w)\s+\[\s+(\w)\s+\]', r'\1[\2]', cons_text)
                 result["constraints"].append(cons_text)
-            
-            # Удаляем блок ограничений из супа
             ul_constraints.decompose()
-            constraints_header.decompose()
+        
+        # Удаляем сам заголовок Constraints
+        constraints_header.decompose()
 
-    # 5. Все, что осталось - это описание
-    # Используем separator=' ' но потом чистим
-    description_text = soup.get_text(separator='\n\n', strip=True)
+    # --- ЭТАП 3: Всё, что осталось — это описание ---
     
-    # Финальная очистка текста описания
-    # Убираем лишние пробелы перед степенями
-    description_text = re.sub(r'(\d)\s+\^', r'\1^', description_text)
-    # Убираем лишние переносы строк
-    description_text = re.sub(r'\n{3,}', '\n\n', description_text)
+    # Теперь soup содержит только описание и картинки, так как
+    # примеры и ограничения мы удалили (.decompose())
     
-    result["description"] = description_text
+    raw_desc = soup.get_text(separator="\n", strip=True)
+    
+    # Финальная чистка текста
+    lines = []
+    for line in raw_desc.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        # Убираем множественные пробелы
+        line = re.sub(r'\s+', ' ', line)
+        lines.append(line)
+        
+    # Собираем обратно
+    result["description"] = "\n\n".join(lines)
     
     return result
 
@@ -512,10 +557,10 @@ def format_markdown_content(problem_number: int, slug: Optional[str],
     # Ограничения
     content += "## ⚠️ Ограничения\n\n"
     if parsed_content.get("constraints"):
-        for constraint in parsed_content["constraints"]:
-            # Экранируем * чтобы не ломать маркдаун, если там есть умножение
-            clean_constraint = constraint.replace('*', '\*')
-            content += f"- {clean_constraint}\n"
+            for constraint in parsed_content["constraints"]:
+                # Экранируем * чтобы не ломать маркдаун, если там есть умножение
+                clean_constraint = constraint.replace('*', r'\*')
+                content += f"- {clean_constraint}\n"
     else:
         content += "- \n"
     
@@ -627,7 +672,7 @@ def move_cpp_file(cpp_file_path: Path, target_dir: Path) -> bool:
 
 
 def create_markdown_file(problem_dir: Path, problem_number: int, 
-                         description: Optional[str], slug: Optional[str] = None,
+                         parsed_content: Optional[dict], slug: Optional[str] = None,
                          is_locked: bool = False) -> bool:
     """
     Создает .md файл с условием задачи.
@@ -635,7 +680,7 @@ def create_markdown_file(problem_dir: Path, problem_number: int,
     Args:
         problem_dir: Директория задачи
         problem_number: Номер задачи
-        description: HTML контент условия задачи (None для Locked задач без описания)
+        parsed_content: Словарь с распарсенными данными (None для Locked задач без описания)
         slug: Slug задачи (опционально)
         is_locked: Является ли задача Premium
         
@@ -643,39 +688,20 @@ def create_markdown_file(problem_dir: Path, problem_number: int,
         True если успешно, False при ошибке
     """
     md_file = problem_dir / f"{problem_number}.md"
-    
-    # Если файл уже существует, пропускаем
-    if md_file.exists():
-        print(f"  Предупреждение: файл {md_file} уже существует, пропускаем создание")
-        return False
+    if md_file.exists(): return False
     
     try:
-        if is_locked and not description:
-            # Создаем шаблон для Locked задачи
-            content = create_locked_problem_template(problem_number, slug)
-        else:
-            # Парсим HTML контент
-            if description:
-                parsed_content = parse_leetcode_html_content(description)
-            else:
-                parsed_content = {
-                    "description": "",
-                    "examples": [],
-                    "constraints": [],
-                    "images": []
-                }
-            
-            # Форматируем в markdown
+        if parsed_content:
+            # Если данные есть (со словаря LeetCode или AlgoMonster)
             content = format_markdown_content(problem_number, slug, parsed_content, is_locked)
-        
+        else:
+            # Если данных совсем нет — создаем шаблон-заглушку
+            content = create_locked_problem_template(problem_number, slug)
+            
         md_file.write_text(content, encoding='utf-8')
-        print(f"  Создан: {md_file}")
         return True
-        
     except Exception as e:
-        print(f"  Ошибка при создании .md файла: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f" Ошибка: {e}")
         return False
 
 
@@ -720,22 +746,24 @@ def organize_file(cpp_file_path: Path, base_path: str) -> bool:
             print(f"  Не удалось получить slug для задачи #{problem_number}")
     
     # Получаем условие задачи
-    description = None
+    description_data = None  # Словарь с распарсенными данными
     
     if is_locked:
         # Для Locked задач пробуем получить с algo.monster
         print(f"  Получение условия с algo.monster...")
-        description = get_algo_monster_problem(problem_number, slug)
-        if description:
+        description_data = get_algo_monster_problem(problem_number, slug)
+        
+        if description_data:
             print(f"  Условие получено с algo.monster")
         else:
-            print(f"  Не удалось получить условие с algo.monster, будет создан шаблон")
+            print(f"  Не удалось получить данные с algo.monster, будет создан шаблон")
     else:
         # Для обычных задач получаем с LeetCode
         if slug:
             print(f"  Получение условия с LeetCode...")
-            description = get_leetcode_problem_description(slug)
-            if description:
+            html_content = get_leetcode_problem_description(slug)
+            if html_content:
+                description_data = parse_leetcode_html_content(html_content)
                 print(f"  Условие получено с LeetCode")
             else:
                 print(f"  Не удалось получить условие с LeetCode")
@@ -743,7 +771,7 @@ def organize_file(cpp_file_path: Path, base_path: str) -> bool:
             print(f"  Пропуск получения условия: slug не найден")
     
     # Создаем .md файл
-    create_markdown_file(problem_dir, problem_number, description, slug, is_locked)
+    create_markdown_file(problem_dir, problem_number, description_data, slug, is_locked)
     
     return True
 
