@@ -271,6 +271,139 @@ def get_leetcode_problem_description(slug: str) -> Optional[str]:
         return None
 
 
+def get_algo_monster_problem(problem_number: int, slug: Optional[str] = None) -> Optional[str]:
+    """
+    Получает условие Premium задачи с algo.monster.
+    
+    Args:
+        problem_number: Номер задачи
+        slug: Slug задачи (опционально, для более точного поиска)
+        
+    Returns:
+        Текст условия задачи или None при ошибке
+    """
+    # Пробуем разные варианты URL на algo.monster
+    urls_to_try = []
+    
+    if slug:
+        urls_to_try.append(f"https://algo.monster/problems/{slug}")
+        urls_to_try.append(f"https://algo.monster/lc/{slug}")
+    
+    urls_to_try.append(f"https://algo.monster/problems/{problem_number}")
+    urls_to_try.append(f"https://algo.monster/lc/{problem_number}")
+    urls_to_try.append(f"https://algo.monster/problems/leetcode-{problem_number}")
+    
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.5"
+    }
+    
+    for url in urls_to_try:
+        try:
+            response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
+            
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.content, 'lxml')
+                
+                # Ищем описание задачи на algo.monster
+                # Структура может отличаться, пробуем разные селекторы
+                description = None
+                
+                # Вариант 1: ищем в основных контентных блоках
+                content_divs = soup.find_all(['div', 'article', 'section'], class_=re.compile(r'content|description|problem|question', re.I))
+                for div in content_divs:
+                    text = div.get_text(strip=True)
+                    if len(text) > 100:  # Достаточно длинный текст, вероятно описание
+                        description = text
+                        break
+                
+                # Вариант 2: ищем в main контенте
+                if not description:
+                    main = soup.find('main')
+                    if main:
+                        description = main.get_text(separator='\n', strip=True)
+                
+                # Вариант 3: ищем в article
+                if not description:
+                    article = soup.find('article')
+                    if article:
+                        description = article.get_text(separator='\n', strip=True)
+                
+                if description and len(description) > 50:
+                    return description
+                    
+        except requests.exceptions.RequestException:
+            continue  # Пробуем следующий URL
+        except Exception as e:
+            print(f"Ошибка при парсинге algo.monster ({url}): {e}")
+            continue
+    
+    print(f"Не удалось получить условие задачи {problem_number} с algo.monster")
+    return None
+
+
+def create_locked_problem_template(problem_number: int, slug: Optional[str] = None) -> str:
+    """
+    Создает шаблон .md файла для Premium (Locked) задач.
+    
+    Args:
+        problem_number: Номер задачи
+        slug: Slug задачи (опционально)
+        
+    Returns:
+        Содержимое .md файла
+    """
+    title = f"Problem {problem_number}"
+    if slug:
+        title += f" - {slug.replace('-', ' ').title()}"
+    
+    algo_monster_urls = []
+    if slug:
+        algo_monster_urls.append(f"https://algo.monster/problems/{slug}")
+        algo_monster_urls.append(f"https://algo.monster/lc/{slug}")
+    algo_monster_urls.append(f"https://algo.monster/problems/{problem_number}")
+    algo_monster_urls.append(f"https://algo.monster/lc/{problem_number}")
+    
+    template = f"""# {title}
+
+## Premium Problem (Locked)
+
+Эта задача доступна только с LeetCode Premium подпиской.
+
+### Ссылки на сторонние ресурсы:
+
+"""
+    
+    for url in algo_monster_urls:
+        template += f"- [algo.monster]({url})\n"
+    
+    template += f"""
+### Условие задачи:
+
+*Заполните условие задачи вручную, используя один из ресурсов выше.*
+
+### Примеры:
+
+```
+Входные данные:
+Выходные данные:
+```
+
+### Ограничения:
+
+- 
+
+### Решение:
+
+```cpp
+// Ваш код находится в {problem_number}.cpp
+```
+"""
+    
+    return template
+
+
 if __name__ == "__main__":
     print("LeetCode File Organizer")
     print("=" * 50)
