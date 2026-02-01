@@ -530,18 +530,115 @@ def create_markdown_file(problem_dir: Path, problem_number: int,
         return False
 
 
-if __name__ == "__main__":
+def organize_file(cpp_file_path: Path, base_path: str) -> bool:
+    """
+    Обрабатывает один .cpp файл: создает папку, перемещает файл и получает условие.
+    
+    Args:
+        cpp_file_path: Путь к .cpp файлу
+        base_path: Базовый путь к директории с задачами
+        
+    Returns:
+        True если успешно обработано, False при ошибке
+    """
+    filename = cpp_file_path.name
+    problem_number = extract_problem_number(filename)
+    
+    if problem_number is None:
+        print(f"Пропуск {filename}: не удалось извлечь номер задачи")
+        return False
+    
+    is_locked = is_locked_problem(filename)
+    
+    print(f"\nОбработка: {filename} (задача #{problem_number}, {'Locked' if is_locked else 'обычная'})")
+    
+    # Создаем папку для задачи
+    problem_dir = create_problem_directory(base_path, problem_number)
+    
+    # Перемещаем .cpp файл
+    if not move_cpp_file(cpp_file_path, problem_dir):
+        # Если файл уже был перемещен, продолжаем
+        pass
+    
+    # Получаем slug задачи
+    slug = None
+    if is_locked or True:  # Всегда получаем slug для ссылок
+        print(f"  Получение slug для задачи #{problem_number}...")
+        slug = get_problem_slug(problem_number)
+        if slug:
+            print(f"  Найден slug: {slug}")
+        else:
+            print(f"  Не удалось получить slug для задачи #{problem_number}")
+    
+    # Получаем условие задачи
+    description = None
+    
+    if is_locked:
+        # Для Locked задач пробуем получить с algo.monster
+        print(f"  Получение условия с algo.monster...")
+        description = get_algo_monster_problem(problem_number, slug)
+        if description:
+            print(f"  Условие получено с algo.monster")
+        else:
+            print(f"  Не удалось получить условие с algo.monster, будет создан шаблон")
+    else:
+        # Для обычных задач получаем с LeetCode
+        if slug:
+            print(f"  Получение условия с LeetCode...")
+            description = get_leetcode_problem_description(slug)
+            if description:
+                print(f"  Условие получено с LeetCode")
+            else:
+                print(f"  Не удалось получить условие с LeetCode")
+        else:
+            print(f"  Пропуск получения условия: slug не найден")
+    
+    # Создаем .md файл
+    create_markdown_file(problem_dir, problem_number, description, slug, is_locked)
+    
+    return True
+
+
+def main():
+    """
+    Основная функция: сканирует .cpp файлы и обрабатывает их.
+    """
     print("LeetCode File Organizer")
     print("=" * 50)
+    print(f"Директория: {LEETCODE_PROBLEMS_PATH}")
+    print()
     
-    # Тест функций извлечения
-    test_files = ["123.cpp", "161Locked.cpp", "269Locked.cpp", "206.cpp"]
-    for test_file in test_files:
-        number = extract_problem_number(test_file)
-        locked = is_locked_problem(test_file)
-        print(f"{test_file}: номер={number}, locked={locked}")
-    
-    # Сканирование файлов
-    print(f"\nСканирование директории: {LEETCODE_PROBLEMS_PATH}")
+    # Сканируем .cpp файлы
     cpp_files = scan_cpp_files(LEETCODE_PROBLEMS_PATH)
+    
+    if not cpp_files:
+        print("Не найдено .cpp файлов для обработки")
+        return
+    
     print(f"Найдено .cpp файлов: {len(cpp_files)}")
+    print(f"Начинаем обработку...\n")
+    
+    # Обрабатываем каждый файл
+    processed = 0
+    failed = 0
+    
+    for cpp_file in cpp_files:
+        try:
+            if organize_file(cpp_file, LEETCODE_PROBLEMS_PATH):
+                processed += 1
+            else:
+                failed += 1
+            # Задержка между запросами для избежания rate limiting
+            time.sleep(2)
+        except Exception as e:
+            print(f"Ошибка при обработке {cpp_file}: {e}")
+            failed += 1
+    
+    print("\n" + "=" * 50)
+    print(f"Обработка завершена!")
+    print(f"Успешно обработано: {processed}")
+    print(f"Ошибок: {failed}")
+
+
+if __name__ == "__main__":
+    main()
