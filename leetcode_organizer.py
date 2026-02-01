@@ -423,16 +423,22 @@ def parse_leetcode_html_content(html_content: str) -> dict:
         # Если li еще не обработан (например, не удален в ограничениях)
         li.insert_before("- ")
 
-    # Степени и индексы
+    # Степени и индексы (сохраняем пробелы вокруг)
     for sup in soup.find_all('sup'):
-        sup.replace_with(f"^{sup.get_text().strip()}")
+        sup_text = sup.get_text().strip()
+        # Добавляем пробел перед, если предыдущий символ - цифра
+        prev_text = sup.previous_sibling
+        if prev_text and isinstance(prev_text, str) and prev_text.rstrip() and prev_text.rstrip()[-1].isdigit():
+            sup.replace_with(f"^{sup_text}")
+        else:
+            sup.replace_with(f"^{sup_text}")
     for sub in soup.find_all('sub'):
         sub.replace_with(f"_{sub.get_text().strip()}")
 
     # --- ЭТАП 2: Извлечение и УДАЛЕНИЕ специальных блоков ---
 
-    # 1. Примеры (обычно в <pre>)
-    # Сначала извлекаем изображения, которые могут быть связаны с примерами
+    # 1. Примеры (обычно в <pre>, но могут быть и в параграфах)
+    # Сначала ищем примеры в <pre> тегах
     pre_tags = soup.find_all('pre')
     for pre in pre_tags:
         text = pre.get_text(separator='\n').strip()
@@ -465,14 +471,9 @@ def parse_leetcode_html_content(html_content: str) -> dict:
                     example[key] = re.sub(r'\s+', ' ', example[key]).strip()
             
             # Проверяем, есть ли изображение рядом с этим примером
-            # Ищем изображения в том же контексте, что и пример
             example_images = []
-            
-            # Ищем изображения перед pre (в предыдущих siblings или в родителе)
-            # Сначала проверяем предыдущие siblings
             prev_sibling = pre.find_previous_sibling()
             while prev_sibling:
-                # Если нашли img, добавляем его
                 if prev_sibling.name == 'img':
                     src = prev_sibling.get('src', '')
                     if src:
@@ -485,18 +486,14 @@ def parse_leetcode_html_content(html_content: str) -> dict:
                             result["images"].remove(src)
                         prev_sibling.decompose()
                         break
-                # Если нашли другой pre или заголовок Example, останавливаемся
                 if prev_sibling.name in ['pre', 'h2', 'h3'] or 'Example' in prev_sibling.get_text():
                     break
                 prev_sibling = prev_sibling.find_previous_sibling()
             
-            # Также проверяем родительский элемент на наличие img
             parent = pre.find_parent()
             if parent:
-                # Ищем img в родителе, которые находятся между этим pre и предыдущим
                 all_imgs = parent.find_all('img')
                 for img in all_imgs:
-                    # Проверяем, находится ли img между предыдущим pre и текущим
                     prev_pre = pre.find_previous('pre')
                     if (prev_pre is None or img.find_previous('pre') == prev_pre) and img.find_next('pre') == pre:
                         src = img.get('src', '')
@@ -513,11 +510,9 @@ def parse_leetcode_html_content(html_content: str) -> dict:
             
             if example_images:
                 example["images"] = example_images
-                # Удаляем эти изображения из общего списка и из soup
                 for img_src in example_images:
                     if img_src in result["images"]:
                         result["images"].remove(img_src)
-                    # Находим и удаляем соответствующий img тег из soup
                     for img_tag, saved_src in all_images:
                         if saved_src == img_src and img_tag in soup:
                             img_tag.decompose()
@@ -526,11 +521,42 @@ def parse_leetcode_html_content(html_content: str) -> dict:
                 result["examples"].append(example)
                 
             # Удаляем сам блок примера из дерева
-            # Также пытаемся удалить заголовок "Example 1:", если он есть перед pre
             previous = pre.find_previous_sibling()
             if previous and 'Example' in previous.get_text():
                 previous.decompose()
             pre.decompose()
+    
+    # Также ищем примеры в параграфах (когда они не в <pre>)
+    # Ищем параграфы с "Example" и "Input/Output"
+    example_paragraphs = []
+    for p in soup.find_all('p'):
+        text = p.get_text(strip=True)
+        # Проверяем, является ли это примером
+        if re.match(r'Example\s+\d+', text, re.I) or ('Example' in text and ('Input' in text or 'Output' in text)):
+            # Ищем Input и Output в этом параграфе или следующих
+            example = {}
+            if 'Input:' in text:
+                input_match = re.search(r'Input:\s*(.+?)(?:\s+Output:|$)', text, re.I)
+                if input_match:
+                    example["input"] = input_match.group(1).strip()
+            if 'Output:' in text:
+                output_match = re.search(r'Output:\s*(.+?)(?:\s+Explanation:|$)', text, re.I)
+                if output_match:
+                    example["output"] = output_match.group(1).strip()
+            
+            # Если нашли пример, удаляем параграф
+            if example:
+                result["examples"].append(example)
+                example_paragraphs.append(p)
+                # Также удаляем следующие параграфы с Input/Output, если они есть
+                next_p = p.find_next_sibling('p')
+                while next_p and ('Input' in next_p.get_text() or 'Output' in next_p.get_text()):
+                    example_paragraphs.append(next_p)
+                    next_p = next_p.find_next_sibling('p')
+    
+    # Удаляем найденные параграфы с примерами
+    for p in example_paragraphs:
+        p.decompose()
     
     # Теперь заменяем оставшиеся изображения (которые не связаны с примерами) на markdown
     for img_tag, src in all_images:
@@ -552,9 +578,12 @@ def parse_leetcode_html_content(html_content: str) -> dict:
                 cons_text = li.get_text(separator=' ', strip=True)
                 # Чистим артефакты ("- " который мы добавили выше)
                 cons_text = cons_text.replace("- ", "", 1).strip()
-                # Фиксы форматирования
+                # Фиксы форматирования (но сохраняем степени)
+                # Убираем пробелы перед ^ только если они лишние
                 cons_text = re.sub(r'(\d)\s+\^', r'\1^', cons_text)
                 cons_text = re.sub(r'(\w)\s+\[\s+(\w)\s+\]', r'\1[\2]', cons_text)
+                # Восстанавливаем пробелы после степеней, если они нужны
+                cons_text = re.sub(r'\^(\d+)([a-zA-Z])', r'^\1 \2', cons_text)
                 result["constraints"].append(cons_text)
             ul_constraints.decompose()
         
@@ -582,14 +611,20 @@ def parse_leetcode_html_content(html_content: str) -> dict:
         if p_text and len(p_text) > 3:
             # Проверяем, не является ли это изображением (уже обработанным)
             if not p_text.startswith('!['):
-                # Нормализуем пробелы
-                p_text = re.sub(r'\s+', ' ', p_text)
-                description_parts.append(p_text)
+                # Проверяем, не является ли это примером (должны были быть удалены, но на всякий случай)
+                if not (re.match(r'Example\s+\d+', p_text, re.I) or ('Input:' in p_text and 'Output:' in p_text)):
+                    # Нормализуем пробелы, но сохраняем степени
+                    p_text = re.sub(r'\s+', ' ', p_text)
+                    # Восстанавливаем пробелы после степеней перед буквами (например, 10^4 letters -> 10^4 letters)
+                    p_text = re.sub(r'\^(\d+)([a-zA-Z])', r'^\1 \2', p_text)
+                    description_parts.append(p_text)
     
     # Если не нашли параграфы, используем весь текст
     if not description_parts:
         raw_desc = soup.get_text(separator=' ', strip=True)
         raw_desc = re.sub(r'\s+', ' ', raw_desc)
+        # Восстанавливаем пробелы после степеней
+        raw_desc = re.sub(r'\^(\d+)([a-zA-Z])', r'^\1 \2', raw_desc)
         description_parts = [raw_desc] if raw_desc else []
     
     # Собираем обратно, разделяя параграфы
