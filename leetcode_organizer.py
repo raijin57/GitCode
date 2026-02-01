@@ -54,7 +54,7 @@ def is_locked_problem(filename: str) -> bool:
     Returns:
         True если в имени файла есть "Locked", иначе False
     """
-    return "Locked" in filename.lower()
+    return "locked" in filename.lower()
 
 
 def scan_cpp_files(directory: str) -> list[Path]:
