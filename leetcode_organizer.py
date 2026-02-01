@@ -272,364 +272,164 @@ def get_leetcode_problem_description(slug: str) -> Optional[str]:
 
 
 def parse_algo_monster_content(html_content: str) -> Optional[dict]:
-    """
-    Специфический парсер для структуры algo.monster/liteproblems.
-    Пытается привести данные к тому же формату, что и LeetCode.
-    """
     soup = BeautifulSoup(html_content, 'html.parser')
-    
-    # В liteproblems основной контент обычно в теге <article> или основном контейнере
-    content_area = soup.find('article') or soup.find('main')
-    if not content_area:
-        return None
+    content_area = soup.find('article')
+    if not content_area: return None
 
-    result = {
-        "description": "",
-        "examples": [],
-        "constraints": [],
-        "images": []
-    }
+    result = {"description": "", "examples": [], "constraints": [], "images": []}
 
-    # Ищем описание (все до первого заголовка Example)
+    # 1. Спец-теги и форматирование (как в LeetCode)
+    for sup in content_area.find_all('sup'):
+        sup.replace_with(f"^{sup.get_text().strip()}")
+    for sub in content_area.find_all('sub'):
+        sub.replace_with(f"_{sub.get_text().strip()}")
+    for code in content_area.find_all('code'):
+        code.replace_with(f" `{code.get_text().strip()}` ")
+    for strong in content_area.find_all(['strong', 'b']):
+        strong.replace_with(f" **{strong.get_text().strip()}** ")
+
+    # 2. Парсинг контента
     description_parts = []
-    found_example = False
-    seen_texts = set()  # Для удаления дубликатов
+    found_stop = False
     
-    # Собираем все параграфы и списки
     for elem in content_area.find_all(['p', 'ul', 'ol', 'pre', 'h2', 'h3']):
-        text = elem.get_text().strip()
-        
-        if 'Example' in text and (elem.name in ['h2', 'h3', 'p']):
-            found_example = True
-            continue
+        txt_lower = elem.get_text().lower()
+        if any(x in txt_lower for x in ['example', 'solution', 'approach', 'constraints']):
+            found_stop = True
             
-        if not found_example:
+        if not found_stop:
             if elem.name == 'p':
-                # Убираем дубликаты
-                if text and text not in seen_texts and len(text) > 10:
-                    description_parts.append(text)
-                    seen_texts.add(text)
+                t = elem.get_text(separator='', strip=True)
+                t = re.sub(r'[ \t]+', ' ', t)
+                if t: description_parts.append(t)
             elif elem.name in ['ul', 'ol']:
-                items_text = "\n".join([f"- {li.get_text().strip()}" for li in elem.find_all('li')])
-                # Убираем дубликаты списков
-                if items_text and items_text not in seen_texts:
-                    description_parts.append(items_text)
-                    seen_texts.add(items_text)
-        
-        # Парсим примеры, если они в блоках <pre>
-        if found_example and elem.name == 'pre':
-            # Пытаемся разделить Input/Output если они внутри одного pre
-            raw_pre = elem.get_text().strip()
-            example = {"input": "", "output": "", "explanation": ""}
-            
-            if "Input:" in raw_pre:
-                parts = raw_pre.split("Output:")
-                example["input"] = parts[0].replace("Input:", "").strip()
-                if len(parts) > 1:
-                    if "Explanation:" in parts[1]:
-                        sub_parts = parts[1].split("Explanation:")
-                        example["output"] = sub_parts[0].strip()
-                        example["explanation"] = sub_parts[1].strip()
-                    else:
-                        example["output"] = parts[1].strip()
-            
-            if example["input"] or example["output"]:
-                result["examples"].append(example)
+                items = [f"- {li.get_text(separator='', strip=True)}" for li in elem.find_all('li')]
+                description_parts.append("\n".join(items))
 
-        # Ограничения (обычно в конце)
-        if 'Constraints' in text:
-            ul = elem.find_next('ul')
-            if ul:
-                result["constraints"] = [li.get_text().strip() for li in ul.find_all('li')]
+        # Примеры
+        if found_stop and elem.name == 'pre':
+            raw = elem.get_text().strip()
+            if "Input:" in raw or "Output:" in raw:
+                ex = {}
+                in_m = re.search(r'Input:\s*(.*?)(?=Output:|$)', raw, re.DOTALL)
+                out_m = re.search(r'Output:\s*(.*?)(?=Explanation:|$)', raw, re.DOTALL)
+                if in_m: ex["input"] = in_m.group(1).strip()
+                if out_m: ex["output"] = out_m.group(1).strip()
+                if ex not in result["examples"]: result["examples"].append(ex)
 
-    result["description"] = "\n\n".join(description_parts)
+    # Чистим степени и склеиваем
+    desc = "\n\n".join(description_parts)
+    desc = re.sub(r'(\d)\s*\^\s*(\d+)', r'\1^\2', desc)
+    result["description"] = desc
     return result
 
 def get_algo_monster_problem(problem_number: int, slug: Optional[str] = None) -> Optional[dict]:
     """
-    Получает данные Premium задачи с algo.monster/liteproblems.
-    Возвращает словарь (как parse_leetcode_html_content), а не просто текст.
+    Загружает Premium задачу с AlgoMonster Lite.
     """
-    urls_to_try = [
-        f"https://algo.monster/liteproblems/{problem_number}",
-        f"https://algo.monster/problems/leetcode-{problem_number}",
-    ]
+    # Сначала пробуем по номеру, потом по слагу
+    urls = [f"https://algo.monster/liteproblems/{problem_number}"]
     if slug:
-        urls_to_try.insert(0, f"https://algo.monster/liteproblems/{slug}")
+        urls.insert(0, f"https://algo.monster/liteproblems/{slug}")
 
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
     }
     
-    for url in urls_to_try:
+    for url in urls:
         try:
             response = requests.get(url, headers=headers, timeout=10)
             if response.status_code == 200:
-                print(f"  Успешно открыт URL: {url}")
-                parsed_data = parse_algo_monster_content(response.text)
-                if parsed_data and (parsed_data["description"] or parsed_data["examples"]):
-                    return parsed_data
-        except Exception as e:
+                data = parse_algo_monster_content(response.text)
+                if data and (data["description"] or data["examples"]):
+                    return data
+        except Exception:
             continue
-            
     return None
 
 
 def parse_leetcode_html_content(html_content: str) -> dict:
-    """
-    Парсит HTML контент задачи LeetCode.
-    Версия 'Nuclear': сохраняет всё (фото, таблицы), удаляя только примеры и ограничения.
-    """
     soup = BeautifulSoup(html_content, 'html.parser')
-    
-    result = {
-        "description": "",
-        "examples": [],
-        "constraints": [],
-        "images": []
-    }
-    
-    # --- ЭТАП 1: Подготовка контента (превращаем теги в текст) ---
+    result = {"description": "", "examples": [], "constraints": [], "images": []}
 
-    # 1. Картинки -> Markdown
-    # Сохраняем ссылки на изображения, но не заменяем их сразу
-    # Заменим их позже, после извлечения примеров
-    all_images = []
-    for img in soup.find_all('img'):
-        src = img.get('src', '')
-        if src:
-            if src.startswith('/'):
-                src = f"https://leetcode.com{src}"
-            elif not src.startswith('http'):
-                src = f"https://leetcode.com/{src}"
-            all_images.append((img, src))
-            result["images"].append(src)
-
-    # 2. Форматирование -> Markdown
-    # Код
-    for code in soup.find_all('code'):
-        code.replace_with(f" `{code.get_text().strip()}` ")
-    
-    # Жирный текст
-    for strong in soup.find_all(['strong', 'b']):
-        strong.replace_with(f" **{strong.get_text().strip()}** ")
-        
-    # Курсив
-    for em in soup.find_all(['em', 'i']):
-        em.replace_with(f" *{em.get_text().strip()}* ")
-        
-    # Списки (превращаем li в текст с дефисом)
-    for li in soup.find_all('li'):
-        # Если li еще не обработан (например, не удален в ограничениях)
-        li.insert_before("- ")
-
-    # Степени и индексы (сохраняем пробелы вокруг)
+    # --- 1. ПРЕДОБРАБОТКА ТЕГОВ ---
+    # Степени и индексы (строго без пробелов)
     for sup in soup.find_all('sup'):
-        sup_text = sup.get_text().strip()
-        # Добавляем пробел перед, если предыдущий символ - цифра
-        prev_text = sup.previous_sibling
-        if prev_text and isinstance(prev_text, str) and prev_text.rstrip() and prev_text.rstrip()[-1].isdigit():
-            sup.replace_with(f"^{sup_text}")
-        else:
-            sup.replace_with(f"^{sup_text}")
+        sup.replace_with(f"^{sup.get_text().strip()}")
     for sub in soup.find_all('sub'):
         sub.replace_with(f"_{sub.get_text().strip()}")
 
-    # --- ЭТАП 2: Извлечение и УДАЛЕНИЕ специальных блоков ---
+    # Форматирование (добавляем ОДИН пробел по краям для предотвращения склейки)
+    for code in soup.find_all('code'):
+        code.replace_with(f" `{code.get_text().strip()}` ")
+    for strong in soup.find_all(['strong', 'b']):
+        strong.replace_with(f" **{strong.get_text().strip()}** ")
+    for em in soup.find_all(['em', 'i']):
+        em.replace_with(f" *{em.get_text().strip()}* ")
 
-    # 1. Примеры (обычно в <pre>, но могут быть и в параграфах)
-    # Сначала ищем примеры в <pre> тегах
-    pre_tags = soup.find_all('pre')
-    for pre in pre_tags:
-        text = pre.get_text(separator='\n').strip()
-        if 'Input:' in text or 'Output:' in text:
+    # Картинки
+    for img in soup.find_all('img'):
+        src = img.get('src', '')
+        if src:
+            if src.startswith('/'): src = f"https://leetcode.com{src}"
+            elif not src.startswith('http'): src = f"https://leetcode.com/{src}"
+            img.replace_with(f"\n\n![Image]({src})\n\n")
+
+    # --- 2. ПРИМЕРЫ (Извлекаем ДО чистки описания) ---
+    for pre in soup.find_all('pre'):
+        # Для примеров берем текст как есть, чтобы не было лишних звезд
+        raw_text = pre.get_text().strip()
+        if 'Input:' in raw_text or 'Output:' in raw_text:
             example = {}
-            input_idx = text.find('Input:')
-            output_idx = text.find('Output:')
-            expl_idx = text.find('Explanation:')
+            # Используем регулярные выражения для чистого извлечения
+            input_m = re.search(r'Input:\s*(.*?)(?=Output:|$)', raw_text, re.DOTALL)
+            output_m = re.search(r'Output:\s*(.*?)(?=Explanation:|$)', raw_text, re.DOTALL)
+            expl_m = re.search(r'Explanation:\s*(.*)', raw_text, re.DOTALL)
             
-            if input_idx != -1:
-                end = output_idx if output_idx != -1 else len(text)
-                example["input"] = text[input_idx + 6:end].strip()
+            if input_m: example["input"] = input_m.group(1).strip()
+            if output_m: example["output"] = output_m.group(1).strip()
+            if expl_m: example["explanation"] = expl_m.group(1).strip()
             
-            if output_idx != -1:
-                end = expl_idx if expl_idx != -1 else len(text)
-                example["output"] = text[output_idx + 7:end].strip()
-                
-            if expl_idx != -1:
-                example["explanation"] = text[expl_idx + 12:].strip()
+            if example: result["examples"].append(example)
             
-            # Очищаем артефакты форматирования из примеров
-            for key in ["input", "output", "explanation"]:
-                if key in example:
-                    # Убираем артефакты типа "** " в начале и конце
-                    example[key] = re.sub(r'^\s*\*\*\s+', '', example[key])
-                    example[key] = re.sub(r'\s+\*\*\s*$', '', example[key])
-                    example[key] = re.sub(r'^\s*\*\s+', '', example[key])
-                    example[key] = re.sub(r'\s+\*\s*$', '', example[key])
-                    # Убираем множественные пробелы
-                    example[key] = re.sub(r'\s+', ' ', example[key]).strip()
-            
-            # Проверяем, есть ли изображение рядом с этим примером
-            example_images = []
-            prev_sibling = pre.find_previous_sibling()
-            while prev_sibling:
-                if prev_sibling.name == 'img':
-                    src = prev_sibling.get('src', '')
-                    if src:
-                        if src.startswith('/'):
-                            src = f"https://leetcode.com{src}"
-                        elif not src.startswith('http'):
-                            src = f"https://leetcode.com/{src}"
-                        example_images.append(src)
-                        if src in result["images"]:
-                            result["images"].remove(src)
-                        prev_sibling.decompose()
-                        break
-                if prev_sibling.name in ['pre', 'h2', 'h3'] or 'Example' in prev_sibling.get_text():
-                    break
-                prev_sibling = prev_sibling.find_previous_sibling()
-            
-            parent = pre.find_parent()
-            if parent:
-                all_imgs = parent.find_all('img')
-                for img in all_imgs:
-                    prev_pre = pre.find_previous('pre')
-                    if (prev_pre is None or img.find_previous('pre') == prev_pre) and img.find_next('pre') == pre:
-                        src = img.get('src', '')
-                        if src:
-                            if src.startswith('/'):
-                                src = f"https://leetcode.com{src}"
-                            elif not src.startswith('http'):
-                                src = f"https://leetcode.com/{src}"
-                            if src not in example_images:
-                                example_images.append(src)
-                            if src in result["images"]:
-                                result["images"].remove(src)
-                            img.decompose()
-            
-            if example_images:
-                example["images"] = example_images
-                for img_src in example_images:
-                    if img_src in result["images"]:
-                        result["images"].remove(img_src)
-                    for img_tag, saved_src in all_images:
-                        if saved_src == img_src and img_tag in soup:
-                            img_tag.decompose()
-            
-            if example:
-                result["examples"].append(example)
-                
-            # Удаляем сам блок примера из дерева
-            previous = pre.find_previous_sibling()
-            if previous and 'Example' in previous.get_text():
-                previous.decompose()
+            # Удаляем заголовок "Example X" перед пре-блоком
+            p_sib = pre.find_previous_sibling()
+            if p_sib and 'Example' in p_sib.get_text(): p_sib.decompose()
             pre.decompose()
-    
-    # Также ищем примеры в параграфах (когда они не в <pre>)
-    # Ищем параграфы с "Example" и "Input/Output"
-    example_paragraphs = []
-    for p in soup.find_all('p'):
-        text = p.get_text(strip=True)
-        # Проверяем, является ли это примером
-        if re.match(r'Example\s+\d+', text, re.I) or ('Example' in text and ('Input' in text or 'Output' in text)):
-            # Ищем Input и Output в этом параграфе или следующих
-            example = {}
-            if 'Input:' in text:
-                input_match = re.search(r'Input:\s*(.+?)(?:\s+Output:|$)', text, re.I)
-                if input_match:
-                    example["input"] = input_match.group(1).strip()
-            if 'Output:' in text:
-                output_match = re.search(r'Output:\s*(.+?)(?:\s+Explanation:|$)', text, re.I)
-                if output_match:
-                    example["output"] = output_match.group(1).strip()
-            
-            # Если нашли пример, удаляем параграф
-            if example:
-                result["examples"].append(example)
-                example_paragraphs.append(p)
-                # Также удаляем следующие параграфы с Input/Output, если они есть
-                next_p = p.find_next_sibling('p')
-                while next_p and ('Input' in next_p.get_text() or 'Output' in next_p.get_text()):
-                    example_paragraphs.append(next_p)
-                    next_p = next_p.find_next_sibling('p')
-    
-    # Удаляем найденные параграфы с примерами
-    for p in example_paragraphs:
-        p.decompose()
-    
-    # Теперь заменяем оставшиеся изображения (которые не связаны с примерами) на markdown
-    for img_tag, src in all_images:
-        if img_tag in soup:  # Если изображение еще не удалено
-            img_tag.replace_with(f"\n\n![Image]({src})\n\n")
 
-    # 2. Ограничения
-    # Ищем блок ограничений и удаляем его
-    constraints_header = None
-    for elem in soup.find_all(['p', 'strong', 'h3', 'div']):
+    # --- 3. ОГРАНИЧЕНИЯ ---
+    for elem in soup.find_all(['p', 'strong', 'h3', 'h4', 'div']):
         if 'Constraint' in elem.get_text():
-            constraints_header = elem
+            ul = elem.find_next('ul')
+            if ul:
+                for li in ul.find_all('li'):
+                    txt = li.get_text(separator='', strip=True)
+                    # Чистим степени в ограничениях: "10 ^ 9" -> "10^9"
+                    txt = re.sub(r'(\d)\s*\^\s*(\d+)', r'\1^\2', txt)
+                    result["constraints"].append(txt)
+                ul.decompose()
+            elem.decompose()
             break
-            
-    if constraints_header:
-        ul_constraints = constraints_header.find_next('ul')
-        if ul_constraints:
-            for li in ul_constraints.find_all('li'):
-                cons_text = li.get_text(separator=' ', strip=True)
-                # Чистим артефакты ("- " который мы добавили выше)
-                cons_text = cons_text.replace("- ", "", 1).strip()
-                # Фиксы форматирования (но сохраняем степени)
-                # Убираем пробелы перед ^ только если они лишние
-                cons_text = re.sub(r'(\d)\s+\^', r'\1^', cons_text)
-                cons_text = re.sub(r'(\w)\s+\[\s+(\w)\s+\]', r'\1[\2]', cons_text)
-                # Восстанавливаем пробелы после степеней, если они нужны
-                cons_text = re.sub(r'\^(\d+)([a-zA-Z])', r'^\1 \2', cons_text)
-                result["constraints"].append(cons_text)
-            ul_constraints.decompose()
-        
-        # Удаляем сам заголовок Constraints
-        constraints_header.decompose()
 
-    # --- ЭТАП 3: Всё, что осталось — это описание ---
-    
-    # Теперь soup содержит только описание и картинки, так как
-    # примеры и ограничения мы удалили (.decompose())
-    
-    # Используем separator=' ' чтобы слова не разбивались на отдельные строки
-    raw_desc = soup.get_text(separator=' ', strip=True)
-    
-    # Финальная чистка текста
-    # Нормализуем пробелы
-    raw_desc = re.sub(r'\s+', ' ', raw_desc)
-    # Разбиваем на параграфы по двойным переносам строк (если они были в оригинале)
-    # Но сначала нужно сохранить структуру параграфов
-    
-    # Лучший подход: извлекаем текст из каждого параграфа отдельно
-    description_parts = []
-    for p in soup.find_all(['p', 'div']):
-        p_text = p.get_text(separator=' ', strip=True)
-        if p_text and len(p_text) > 3:
-            # Проверяем, не является ли это изображением (уже обработанным)
-            if not p_text.startswith('!['):
-                # Проверяем, не является ли это примером (должны были быть удалены, но на всякий случай)
-                if not (re.match(r'Example\s+\d+', p_text, re.I) or ('Input:' in p_text and 'Output:' in p_text)):
-                    # Нормализуем пробелы, но сохраняем степени
-                    p_text = re.sub(r'\s+', ' ', p_text)
-                    # Восстанавливаем пробелы после степеней перед буквами (например, 10^4 letters -> 10^4 letters)
-                    p_text = re.sub(r'\^(\d+)([a-zA-Z])', r'^\1 \2', p_text)
-                    description_parts.append(p_text)
-    
-    # Если не нашли параграфы, используем весь текст
-    if not description_parts:
-        raw_desc = soup.get_text(separator=' ', strip=True)
-        raw_desc = re.sub(r'\s+', ' ', raw_desc)
-        # Восстанавливаем пробелы после степеней
-        raw_desc = re.sub(r'\^(\d+)([a-zA-Z])', r'^\1 \2', raw_desc)
-        description_parts = [raw_desc] if raw_desc else []
-    
-    # Собираем обратно, разделяя параграфы
-    result["description"] = "\n\n".join(description_parts)
-    
+    # --- 4. СБОРКА ОПИСАНИЯ ---
+    desc_parts = []
+    # Берем только элементы верхнего уровня, чтобы избежать дублей
+    for child in soup.find_all(['p', 'div', 'ul', 'ol', 'blockquote'], recursive=False):
+        # Используем separator='', так как пробелы уже расставлены в шаге 1
+        text = child.get_text(separator='', strip=True)
+        if not text: continue
+        
+        if child.name in ['ul', 'ol']:
+            items = [f"- {li.get_text(separator='', strip=True)}" for li in child.find_all('li')]
+            text = "\n".join(items)
+        
+        # Финальная чистка: убираем лишние пробелы, но оставляем один между словами
+        text = re.sub(r'[ \t]+', ' ', text)
+        # Склеиваем степени: "10 ^ 9" -> "10^9"
+        text = re.sub(r'(\d)\s*\^\s*(\d+)', r'\1^\2', text)
+        desc_parts.append(text)
+
+    result["description"] = "\n\n".join(desc_parts).strip()
     return result
 
 
